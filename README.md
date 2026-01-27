@@ -1,1 +1,1 @@
-# Sanitize-NowPlaying-for-Stereo-Tool
+# Sanitize NowPlaying for Stereo Tool
