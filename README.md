@@ -29,7 +29,7 @@ Run the script from a command prompt:
 
 You may have to allow local scripts: 
     
-    PowerShell Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+    powershell -Command "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"
 
 Alternatively, you can run the standalone .exe (contained within Sanitize-NowPlaying.zip), which requires no PowerShell configuration.
 
