@@ -28,7 +28,7 @@ try { [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false) } 
 try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.9.127"
+$ScriptVersion = "1.9.128"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -4340,7 +4340,7 @@ function Strip-LowPriorityDashSuffix([string]$s) {
     #   "Run to Me - Live @Ahoy"        -> "Run to Me"  (handled earlier; kept here as an example)
     #   "Song Title – Acoustic Session" -> "Song Title"
     # This is intentionally conservative: it only triggers when the suffix starts with a dash and a known keyword.
-    $kw = "(?:live|acoustic|acoustical|unplugged|session)"
+    $kw = "(?:live|acoustic|acoustical|session)"
     $t2 = [regex]::Replace($t, "\s*[-–—]\s*\b$kw\b.*$", "", "IgnoreCase").Trim()
 
     if ($t2 -and $t2 -ne $t) { return $t2 }
@@ -4358,7 +4358,7 @@ function Strip-LiveDashSuffixAlways([string]$s) {
     #   "Song Title – Live at Wembley" -> "Song Title"
     #
     # This is intentionally narrow: it only triggers when "live" is introduced by a dash separator.
-    $t2 = [regex]::Replace($t, "\s*[-–—]\s*live\b.*$", "", "IgnoreCase").Trim()
+    $t2 = [regex]::Replace($t, "\s*[-–—]\s*(?:live|(?:mtv\s+)?unplugged)\b.*$", "", "IgnoreCase").Trim()
 
     if ($t2 -and $t2 -ne $t) { return $t2 }
     return $t
@@ -4379,7 +4379,15 @@ function Strip-LiveBracketSuffixAlways([string]$s) {
     # Case 1: trailing "[Live ...]" (no nesting support needed).
     $t = [regex]::Replace(
         $t,
-        "\s*\[\s*live\b[^\]]*\]\s*$",
+        "\s*\[\s*(?:live|(?:mtv\s+)?unplugged)\b[^\]]*\]\s*$",
+        "",
+        "IgnoreCase"
+    )
+
+    # Case 1b: trailing "{Live ...}" or "{Unplugged ...}" (no nesting support needed).
+    $t = [regex]::Replace(
+        $t,
+        "\s*\{\s*(?:live|(?:mtv\s+)?unplugged)\b[^}]*\}\s*$",
         "",
         "IgnoreCase"
     )
@@ -4387,7 +4395,7 @@ function Strip-LiveBracketSuffixAlways([string]$s) {
     # Case 2: trailing "(Live ...)" with possible nested parentheses.
     $t = [regex]::Replace(
         $t,
-        "\s*\(\s*live\b(?>[^()]+|\((?<d>)|\)(?<-d>))*(?(d)(?!))\)\s*$",
+        "\s*\(\s*(?:live|(?:mtv\s+)?unplugged)\b(?>[^()]+|\((?<d>)|\)(?<-d>))*(?(d)(?!))\)\s*$",
         "",
         "IgnoreCase"
     )
