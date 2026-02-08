@@ -31,5 +31,5 @@ You may have to allow local scripts:
     
     PowerShell > Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-Alternatively, you can run the standalone .exe, which requires no PowerShell configuration.
+Alternatively, you can run the standalone .exe (contained within Sanitize-NowPlaying.zip), which requires no PowerShell configuration.
 
