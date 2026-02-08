@@ -27,5 +27,9 @@ Run the script from a command prompt:
 
     PowerShell -NoProfile -ExecutionPolicy Bypass -File .\sanitize-nowplaying.ps1
 
+You may have to allow local scripts: 
+    
+    PowerShell > Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
 Alternatively, you can run the standalone .exe, which requires no PowerShell configuration.
 
