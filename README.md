@@ -21,9 +21,6 @@ This project was created through iterative co-development with ChatGPT 5.2, comb
 - Persistent JSON configuration and single-instance protection
 - Runs on Windows 10/11 (script or standalone .exe)
 
-![UI example](images/Sanitize.png)
-
-
 
 # Usage
 
@@ -37,3 +34,12 @@ You may have to allow local scripts first (one-time step):
 
 Alternatively, you can run the standalone .exe (contained within Sanitize-NowPlaying.zip), which requires no PowerShell configuration.
 
+# Example screenshots
+![UI example](images/ex01.png)
+![UI example](images/ex02.png)
+![UI example](images/ex03.png)
+![UI example](images/ex04.png)
+![UI example](images/ex05.png)
+![UI example](images/ex06.png)
+![UI example](images/ex07.png)
+![UI example](images/ex08.png)
