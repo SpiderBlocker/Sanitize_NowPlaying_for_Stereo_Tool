@@ -28,7 +28,7 @@ try { [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false) } 
 try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.9.130"
+$ScriptVersion = "1.9.131"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -4367,7 +4367,7 @@ function Strip-LowPriorityDashSuffix([string]$s) {
     #   "Run to Me - Live @Ahoy"        -> "Run to Me"  (handled earlier; kept here as an example)
     #   "Song Title – Acoustic Session" -> "Song Title"
     # This is intentionally conservative: it only triggers when the suffix starts with a dash and a known keyword.
-    $kw = "(?:live|acoustic|acoustical|session)"
+    $kw = "(?:live|acoustic|acoustical|acoustique|akustisch|unplugged|session|studio(?:\s*(?:version|versie|versión|versione|versao|versão))?)"
     $t2 = [regex]::Replace($t, "\s*[-–—]\s*\b$kw\b.*$", "", "IgnoreCase").Trim()
 
     if ($t2 -and $t2 -ne $t) { return $t2 }
@@ -5204,6 +5204,7 @@ if ($sepCount -eq 1) {
     $title2 = Strip-LiveLocationTail    $title2
     $title2 = Strip-AudioFormatTail     $title2
     $title2 = Strip-VersionMixTail      $title2
+    $title2 = Strip-LowPriorityDashSuffix $title2
     $title2 = Dedup-DuplicateTitle      $title2
     $title2 = Cleanup-Whitespace        $title2
     $title2 = Strip-AlwaysRemoveNoiseTags              $title2
@@ -5394,7 +5395,7 @@ function Do-Update {
 
         $script:LastGoodUpdate = Get-Date
         $script:HasSeenFreshInput      = $true
-$StartupExpiredChecked   = $true
+$script:StartupExpiredChecked = $true
 
         # Consider the input "not available" whenever we cannot extract valid metadata.
         # This covers BOM-only / whitespace-only inputs and malformed payloads.
@@ -5444,7 +5445,7 @@ $StartupPublishFreshSec = 180
 # Tracks whether we've successfully processed at least one fresh input since start.
 $script:HasSeenFreshInput      = $false
 # Tracks whether startup expiry logic has been evaluated
-$StartupExpiredChecked   = $false
+$script:StartupExpiredChecked = $false
 Init-Ui
 
 # Clear outputs immediately on startup to prevent stale broadcasts.
