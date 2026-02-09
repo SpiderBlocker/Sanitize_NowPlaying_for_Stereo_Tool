@@ -28,7 +28,7 @@ try { [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false) } 
 try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.9.129"
+$ScriptVersion = "1.9.130"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -147,8 +147,8 @@ $script:Settings = @{
     TransliterationEnabled = $true
     AsciiSafeEnabled       = $false
     WorkDirWizardDone      = $false
-    DelimiterKey           = 'U241F'  # One of: U241F, TAB, CUSTOM
-    DelimiterCustom        = '' # Used when DelimiterKey = CUSTOM
+    DelimiterKey       = 'U241F'  # One of: U241F, TAB, CUSTOM
+    DelimiterCustom    = '' # Used when DelimiterKey = CUSTOM
 }
 
 function Get-HashtableFromPsObject($obj) {
@@ -266,13 +266,13 @@ function Ensure-WorkDirOrFallback {
 function Set-WorkDirPaths([string]$dir) {
     # Centralized path derivation for all workdir-dependent files.
     # NOTE: Uses the same variable names/assignments as the original inline blocks (behavior-preserving).
-    $InFile               = Join-Path $dir 'nowplaying.txt'
-    $script:InFile        = $InFile
-    $PrefixFile           = Join-Path $dir 'nowplaying_prefix.txt'
-    $script:PrefixFile    = $PrefixFile
-    $OutFileRt            = Join-Path $dir 'nowplaying_rt.txt'
-    $script:OutFileRt     = $OutFileRt
-    $OutFileRtPlus        = Join-Path $dir 'nowplaying_rtplus.txt'
+    $InFile              = Join-Path $dir 'nowplaying.txt'
+    $script:InFile       = $InFile
+    $PrefixFile          = Join-Path $dir 'nowplaying_prefix.txt'
+    $script:PrefixFile   = $PrefixFile
+    $OutFileRt           = Join-Path $dir 'nowplaying_rt.txt'
+    $script:OutFileRt    = $OutFileRt
+    $OutFileRtPlus       = Join-Path $dir 'nowplaying_rtplus.txt'
     $script:OutFileRtPlus = $OutFileRtPlus
 }
 
@@ -3662,9 +3662,26 @@ function Get-CountryPrefixRegex() {
 
     # Add a few common legacy/alternate English country names that RegionInfo may not emit on this system.
     foreach ($alias in @(
+        "UK",
+        "U.K.",
+        "Great Britain",
+        "Britain",
+        "USA",
+        "U.S.A.",
+        "US",
+        "U.S.",
         "Czech Republic",
         "The Czech Republic",
-        "Czechia"
+        "Czechia",
+        "F.Y.R. Macedonia",
+        "FYR Macedonia",
+        "North Macedonia",
+        "Republic of North Macedonia",
+        "Serbia & Montenegro",
+        "Yugoslavia",
+        "Russian Federation",
+        "Byelorussia",
+        "Türkiye"
     )) {
         if (-not [string]::IsNullOrWhiteSpace($alias)) { [void]$names.Add($alias.Trim()) }
     }
