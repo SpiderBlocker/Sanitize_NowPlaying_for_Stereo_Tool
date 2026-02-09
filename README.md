@@ -21,6 +21,11 @@ This project was created through iterative co-development with ChatGPT 5.2, comb
 - Persistent JSON configuration and single-instance protection
 - Runs on Windows 10/11 (script or standalone .exe)
 
+![UI example]
+(images/Sanitize.png)
+
+
+
 # Usage
 
 Run the script from a command prompt:
