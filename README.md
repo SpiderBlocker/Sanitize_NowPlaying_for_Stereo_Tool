@@ -37,7 +37,7 @@ Alternatively, you can run the standalone .exe (contained within Sanitize-NowPla
 
 # Example screenshots
 
-- ![UI example](images/ex01.png)
+![UI example](images/ex01.png)
 
 ![UI example](images/ex02.png)
 
