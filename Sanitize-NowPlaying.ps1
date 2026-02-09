@@ -28,7 +28,7 @@ try { [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false) } 
 try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.9.131"
+$ScriptVersion = "1.9.132"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -138,7 +138,7 @@ if ([string]::IsNullOrWhiteSpace($AppBaseDir)) {
     try { $AppBaseDir = (Get-Location).Path } catch { $AppBaseDir = '.' }
 }
 
-$SettingsFile = Join-Path $AppBaseDir 'sanitize-nowplaying.settings.json'
+$SettingsFile = Join-Path $AppBaseDir 'Sanitize-NowPlaying.settings.json'
 
 # In-memory settings (defaults).
 $script:Settings = @{
