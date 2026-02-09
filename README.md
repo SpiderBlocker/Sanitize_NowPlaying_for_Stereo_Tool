@@ -34,7 +34,8 @@ You may have to allow local scripts first (one-time step):
 
 Alternatively, you can run the standalone .exe (contained within Sanitize-NowPlaying.zip), which requires no PowerShell configuration.
 
-In your playout software, configure "nowplaying.txt" to be written to the selected working directory (eg. C:\RDS). 
+In your playout software, configure "nowplaying.txt" to be written to the selected working directory (eg. C:\RDS).
+
 Match the field delimiter symbol(s) between %artist and %title in your playout software to the symbol(s) as set in the F10-menu: Playout delimiter. The actual chosen delimiter will be copied to the clipboard for your convenience. If the recommended "␟"-symbol is used as the delimiter symbol, the Metadata setting in the playout software would then become "%artist␟%title".
 
 
