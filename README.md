@@ -24,19 +24,22 @@ This project was created through iterative co-development with ChatGPT 5.2, comb
 
 # Usage
 
-Run the script from a command prompt:
+Save and run the standalone .exe (included in Sanitize-NowPlaying.zip) from any directory.
+No PowerShell configuration is required.
+
+Alternatively, you can run the script from a command prompt:
 
     PowerShell -NoProfile -ExecutionPolicy Bypass -File .\sanitize-nowplaying.ps1
 
-You may have to allow local scripts first (one-time step): 
+You may first have to allow local scripts (one-time step): 
     
     PowerShell Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-Alternatively, you can run the standalone .exe (contained within Sanitize-NowPlaying.zip), which requires no PowerShell configuration.
+In your playout software, configure nowplaying.txt to be written to the selected working directory (e.g. C:\RDS).
 
-In your playout software, configure "nowplaying.txt" to be written to the selected working directory (eg. C:\RDS).
+Ensure that the field delimiter used between %artist and %title matches the delimiter configured in the F10 menu (Playout delimiter). The selected delimiter is automatically copied to the clipboard for convenience. For example, when the recommended "␟" character is used, the metadata setting in the playout software should be:
 
-Match the field delimiter symbol(s) between %artist and %title in your playout software to the symbol(s) as set in the F10-menu: [Playout delimiter]. The actual chosen delimiter will be copied to the clipboard for your convenience. For example, if the recommended "␟"-symbol is used as the delimiter symbol, the Metadata setting in the playout software would then become "%artist␟%title".
+    "%artist␟%title"
 
 
 # Example screenshots
