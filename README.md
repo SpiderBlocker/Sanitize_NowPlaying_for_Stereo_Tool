@@ -24,7 +24,7 @@ This project was created through iterative co-development with ChatGPT 5.2, comb
 
 # Usage
 
-Save and run the standalone .exe (included in Sanitize-NowPlaying.zip) from any directory.
+Save the standalone .exe (included in Sanitize-NowPlaying.zip) to any directory with write permissions and run it from there. The application stores its JSON settings file in the same location.
 No PowerShell configuration is required.
 
 Alternatively, you can run the script from a command prompt:
