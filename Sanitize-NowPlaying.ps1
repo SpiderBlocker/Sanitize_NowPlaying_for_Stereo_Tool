@@ -28,7 +28,7 @@ try { [Console]::InputEncoding  = New-Object System.Text.UTF8Encoding($false) } 
 try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.9.132"
+$ScriptVersion = "1.9.133"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -3613,13 +3613,18 @@ function Strip-TrackNumberPrefixLoose([string]$s) {
     if ([string]::IsNullOrWhiteSpace($s)) { return $s }
     $t = $s.Trim()
 
-    # Ultra-conservative:
-    # - "(03) " or "[03] " or "03 " (exactly two digits)
-    # - followed by at least one space
-    # - and then a letter
+    # Conservative:
+    # Only strip a 2-digit prefix when it is clearly separated from the artist/title by an unambiguous delimiter.
+    #
+    # Accepted examples:
+    #   "03. Artist"     "03 - Artist"     "03: Artist"
+    #   "(03) Artist"    "[03] Artist"     "{03} Artist"
+    #
+    # Rejected examples (to avoid damaging legitimate artist names):
+    #   "50 Cent"        "77 Bombay Street"
     $m = [regex]::Match(
         $t,
-        "^\s*(?:\(\s*)?(?:\[\s*)?(?<n>\d{2})(?:\s*\])?(?:\s*\))?\s+(?<next>.)",
+        "^\s*(?:(?:\(\s*|\[\s*|\{\s*)?(?<n>\d{2})(?:\s*(?<closer>\)|\]|\}))\s+(?<next>.)|(?<n>\d{2})\s*(?<sep>[\.\-_:])\s+(?<next>.))",
         "CultureInvariant"
     )
 
@@ -3628,11 +3633,10 @@ function Strip-TrackNumberPrefixLoose([string]$s) {
     $next = $m.Groups["next"].Value
     if (-not $next) { return $t }
 
-    if (-not [char]::IsLetter($next, 0)) { return $t }
-
-    # Keep the first letter by cutting from the 'next' group index.
+    # Keep the first character by cutting from the 'next' group index.
     return $t.Substring($m.Groups["next"].Index).Trim()
 }
+
 
 # -------------------- Country-prefix stripping (title) -------------------------
 
@@ -3657,8 +3661,6 @@ function Get-CountryPrefixRegex() {
             } catch { }
         }
     } catch { }
-
-    # Add a few common "The <country>" forms (RegionInfo typically omits the article).
 
     # Add a few common legacy/alternate English country names that RegionInfo may not emit on this system.
     foreach ($alias in @(
