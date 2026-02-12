@@ -27,6 +27,15 @@ This project was created through iterative co-development with ChatGPT 5.2, comb
 Save the standalone .exe (included in Sanitize-NowPlaying.zip) to any directory with write permissions and run it from there. The application stores its JSON settings file in the same location.
 No PowerShell configuration is required.
 
+When running on Windows 11, the application may open inside Windows Terminal tabs.  
+For best compatibility, it is recommended to run it using the classic console host (conhost.exe). Create a shortcut and set the target to:
+
+    conhost.exe "<full-path>\Sanitize-NowPlaying.exe"
+
+Example:
+
+    conhost.exe "C:\RDS\Sanitize-NowPlaying.exe"
+<br>
 Alternatively, you can run the script from a command prompt:
 
     PowerShell -NoProfile -ExecutionPolicy Bypass -File .\sanitize-nowplaying.ps1
@@ -34,7 +43,7 @@ Alternatively, you can run the script from a command prompt:
 You may first have to allow local scripts (one-time step): 
     
     PowerShell Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-
+<br>
 In your playout software, configure nowplaying.txt to be written to the selected working directory (e.g. C:\RDS).
 
 Ensure that the field delimiter used between %artist and %title matches the delimiter configured in the F10 menu (Playout delimiter). The selected delimiter is automatically copied to the clipboard for convenience. For example, when the recommended "␟" character is used, the metadata setting in the playout software should be:
