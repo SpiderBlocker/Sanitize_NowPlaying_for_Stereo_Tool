@@ -49,7 +49,7 @@ In your playout software, configure nowplaying.txt to be written to the selected
 Ensure that the field delimiter used between %artist and %title matches the delimiter configured in the F10 menu (Playout delimiter). The selected delimiter is automatically copied to the clipboard for convenience. For example, when the recommended "␟" character is used, the metadata setting in the playout software should be:
 
     "%artist␟%title"
-
+Then configure Stereo Tool (or any other RDS encoder) to read from the sanitized output text file(s).
 
 # Example screenshots
 
