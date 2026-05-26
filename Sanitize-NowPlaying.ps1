@@ -105,7 +105,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.10.22"
+$ScriptVersion = "1.10.23"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -227,19 +227,21 @@ function Get-HashtableFromPsObject($obj) {
 }
 
 function Save-Settings {
+    $tmp = $null
+
     try {
         $json = ($script:Settings | ConvertTo-Json -Depth 6)
         $tmp  = [System.IO.Path]::Combine($AppBaseDir, ('~settings_{0}.tmp' -f ([System.Guid]::NewGuid().ToString('N'))))
         [System.IO.File]::WriteAllText($tmp, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($true)))
         Move-Item -LiteralPath $tmp -Destination $SettingsFile -Force
     } catch {
-        try { if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } } catch { }
+        try { if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } } catch { }
     }
 }
 
 function Load-Settings {
     # 1) Load JSON if present.
-    if (Test-Path $SettingsFile) {
+    if (Test-Path -LiteralPath $SettingsFile) {
         try {
             $raw = Get-Content -LiteralPath $SettingsFile -Raw -ErrorAction Stop
             $obj = $raw | ConvertFrom-Json -ErrorAction Stop
@@ -1285,15 +1287,6 @@ function Show-DelimiterMenu {
                     Set-Clipboard -Value $s
                     return $true
                 }
-            } catch { }
-
-            # Fallback: clip.exe (available on most supported Windows versions)
-            try {
-                $p = Start-Process -FilePath "clip.exe" -NoNewWindow -PassThru -RedirectStandardInput "pipe" -ErrorAction Stop
-                $p.StandardInput.Write($s)
-                $p.StandardInput.Close()
-                $p.WaitForExit()
-                return ($p.ExitCode -eq 0)
             } catch { }
 
             # Last resort: Windows Forms clipboard (may fail if not in STA)
@@ -4866,9 +4859,9 @@ function Dedup-BracketedArtistPrefix([string]$artist) {
 
 function Read-TextRobust([string]$path) {
     for ($i = 0; $i -lt $ReadRetryCount; $i++) {
-        try { return Get-Content -Path $path -Raw -Encoding UTF8 -ErrorAction Stop }
+        try { return Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop }
         catch {
-            try { return Get-Content -Path $path -Raw -Encoding Default -ErrorAction Stop }
+            try { return Get-Content -LiteralPath $path -Raw -Encoding Default -ErrorAction Stop }
             catch { Start-Sleep -Milliseconds $ReadRetryDelayMs }
         }
     }
@@ -4891,9 +4884,12 @@ function Read-NowPlayingStable([string]$path) {
 
         $parts = $raw2 -split [regex]::Escape($SepChar), 2
         if ($parts.Count -ge 2) {
-            $a = $parts[0]
             $t = $parts[1]
-            if ([string]::IsNullOrWhiteSpace($a) -or [string]::IsNullOrWhiteSpace($t)) { return $raw }
+            if (-not [string]::IsNullOrWhiteSpace($t)) { return $raw }
+            if ($i -lt ($tries - 1)) {
+                Start-Sleep -Milliseconds $stepMs
+                continue
+            }
             return $raw
         }
 
@@ -4915,7 +4911,7 @@ function Write-Utf8NoBomAtomic([string]$path, [string]$text, [string]$tmpName) {
 
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($tmp, $text, $utf8NoBom)
-        Move-Item -Force -Path $tmp -Destination $path -ErrorAction Stop
+        Move-Item -Force -LiteralPath $tmp -Destination $path -ErrorAction Stop
         return $true
     } catch {
         try { if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue | Out-Null } } catch { }
@@ -4940,7 +4936,7 @@ function Write-OutputsAtomic([string]$rtText, [string]$rtPlusText, [string]$pref
 
 function Hard-TruncateFileUtf8NoBom([string]$path) {
     $dir = Split-Path -Parent $path
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
@@ -6329,7 +6325,7 @@ Initialize-Watcher
 $script:LastStamp = ""
 
 function Get-InputStamp {
-    if (-not (Test-Path $InFile)) { return "" }
+    if (-not (Test-Path -LiteralPath $InFile)) { return "" }
     try {
         $fi = Get-Item -LiteralPath $InFile -ErrorAction Stop
         return ("{0:o}|{1}" -f $fi.LastWriteTimeUtc, $fi.Length)
@@ -6337,7 +6333,7 @@ function Get-InputStamp {
 }
 
 function Get-InputUiState {
-    if (-not (Test-Path $InFile)) { return "NotAvailable" }
+    if (-not (Test-Path -LiteralPath $InFile)) { return "NotAvailable" }
     try {
         $it = Get-Item -LiteralPath $InFile -ErrorAction Stop | Out-Null
 
@@ -6418,7 +6414,7 @@ function Compose-OutputsFromRaw([string]$raw) {
 function Do-Update {
     if ($script:Stopping) { return }
 
-    if (Test-Path $InFile) {
+    if (Test-Path -LiteralPath $InFile) {
         $raw = Read-NowPlayingStable $InFile
         $o   = Compose-OutputsFromRaw $raw
 
@@ -6486,7 +6482,7 @@ $script:LastStamp = Get-InputStamp
 
 $publishNow                    = $false
 $script:StartupInputWasExpired = $false
-if (Test-Path $InFile) {
+if (Test-Path -LiteralPath $InFile) {
     try {
         $fi     = Get-Item -LiteralPath $InFile -ErrorAction Stop
         $ageSec = ([DateTime]::UtcNow - $fi.LastWriteTimeUtc).TotalSeconds
@@ -6499,7 +6495,7 @@ if (Test-Path $InFile) {
 if ($publishNow) {
     Do-Update
 } else {
-    if (Test-Path $InFile) {
+    if (Test-Path -LiteralPath $InFile) {
         try { Update-Status "" "" "" "" "Expired" } catch { }
     } else {
         try { Update-Status "" "" "" "" "NotAvailable" } catch { }
