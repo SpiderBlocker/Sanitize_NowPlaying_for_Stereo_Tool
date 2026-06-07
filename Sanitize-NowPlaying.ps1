@@ -105,7 +105,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.10.23"
+$ScriptVersion = "1.10.24"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -261,7 +261,9 @@ function Load-Settings {
 
 function Ensure-Directory([string]$dir, [string]$purpose) {
     if ([string]::IsNullOrWhiteSpace($dir)) { return $false }
-    if (Test-Path -LiteralPath $dir) { return $true }
+    if (Test-Path -LiteralPath $dir) {
+        return (Test-Path -LiteralPath $dir -PathType Container)
+    }
 
     try {
         New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
@@ -280,14 +282,23 @@ function Ensure-WorkDirOrFallback {
     $wizardDone = $false
     try { $wizardDone = [bool]$script:Settings.WorkDirWizardDone } catch { $wizardDone = $false }
 
-    if ($wanted -and (Test-Path -LiteralPath $wanted)) { return $wanted }
+    if ($wanted -and (Test-Path -LiteralPath $wanted -PathType Container)) { return $wanted }
     if ($wanted -and $wizardDone -and (Ensure-Directory $wanted "WorkDir")) { return $wanted }
 
     # Fallbacks that are typically writable without admin rights.
-    $candidates = @(
-    (Join-Path $env:ProgramData "RDS"),
-    (Join-Path $env:LOCALAPPDATA "RDS")
-    )
+    $candidates = @()
+
+    foreach ($base in @($env:ProgramData, $env:LOCALAPPDATA)) {
+        if (-not [string]::IsNullOrWhiteSpace($base)) {
+            try { $candidates += (Join-Path $base "RDS") } catch { }
+        }
+    }
+
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($HOME)) {
+            $candidates += (Join-Path $HOME ".rds")
+        }
+    } catch { }
 
     foreach ($c in $candidates) {
         if (Ensure-Directory $c "Fallback WorkDir") {
