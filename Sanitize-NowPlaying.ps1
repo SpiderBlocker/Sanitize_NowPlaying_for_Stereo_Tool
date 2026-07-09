@@ -10,7 +10,7 @@
 # - nowplaying_prefix.txt    : prefix text (or empty; only when a valid RT exists)
 #
 # Console UI:
-# - Always shows both RT and RT+ outputs.
+# - Always shows b oth RT and RT+ outputs.
 # - Shows PREFIX OUT under INPUT in the live window.
 # - Heartbeat status bar with clock + elapsed-since-update indicator.
 #
@@ -105,7 +105,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "1.10.24"
+$ScriptVersion = "1.10.25"
 # Console compatibility switches
 # These toggles exist to reduce the risk of host-specific console crashes/quirks on some systems.
 # Defaults preserve the current behavior.
@@ -214,8 +214,8 @@ $script:Settings = @{
     TransliterationEnabled = $true
     AsciiSafeEnabled       = $false
     WorkDirWizardDone      = $false
-    DelimiterKey       = 'U241F'  # One of: U241F, TAB, CUSTOM
-    DelimiterCustom    = '' # Used when DelimiterKey = CUSTOM
+    DelimiterKey           = 'U241F'  # One of: U241F, TAB, CUSTOM
+    DelimiterCustom        = '' # Used when DelimiterKey = CUSTOM
 }
 
 function Get-HashtableFromPsObject($obj) {
@@ -1376,8 +1376,6 @@ function Show-DelimiterMenu {
                 $warnUntil = (Get-Date).AddMilliseconds(900)
             }
 
-            try { [Console]::CursorVisible = $true } catch { }
-
             function _DrawInputBox([string]$textToShow, [switch]$HasOverflow, [string]$WarningText) {
                 Write-At $bx $by       ("┌" + ("─" * ($boxW - 2)) + "┐") ($UI_Color_MenuFrame)
 
@@ -1423,38 +1421,55 @@ function Show-DelimiterMenu {
                 # Cursor at end (best effort)
                 $cursorX = $bx + 2 + [Math]::Min($innerW, ($prompt.Length + $shown.Length))
                 if ($cursorX -ge ($bx + $boxW - 2)) { $cursorX = $bx + $boxW - 3 }
-                Set-UiCursorPosition $cursorX ($by + 3)
+                Set-UiInputCursor $cursorX ($by + 3)
             }
 
-            while ($true) {
-                if ($warnText -and (Get-Date) -gt $warnUntil) { $warnText = "" }
-                $hasOverflow = $false
-                $show        = (Format-DelimiterForDisplay $buf)
-                _DrawInputBox $show -HasOverflow:$hasOverflow -WarningText:$warnText
+            $needsInputRedraw = $true
+            try {
+                while ($true) {
+                    if ($warnText -and (Get-Date) -gt $warnUntil) { $warnText = ""; $needsInputRedraw = $true }
+                    $hasOverflow = $false
+                    $show        = (Format-DelimiterForDisplay $buf)
+                    if ($needsInputRedraw) {
+                        _DrawInputBox $show -HasOverflow:$hasOverflow -WarningText:$warnText
+                        $needsInputRedraw = $false
+                    } else {
+                        $innerW  = $boxW - 4
+                        $shown   = $show
+                        if ($shown.Length -gt $innerW) { $shown = $shown.Substring($shown.Length - $innerW, $innerW) }
+                        $cursorX = $bx + 2 + [Math]::Min($innerW, ($prompt.Length + $shown.Length))
+                        if ($cursorX -ge ($bx + $boxW - 2)) { $cursorX = $bx + $boxW - 3 }
+                        Set-UiInputCursor $cursorX ($by + 3)
+                    }
 
-                $k = [Console]::ReadKey($true)
-                if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
-                if ($k.Key -eq [ConsoleKey]::Enter) {
-                    $val = $buf
-                    if ([string]::IsNullOrWhiteSpace($val)) { return $null }
-                    if ($val.Length -gt $MaxCustomDelimiterLen) { $val = $val.Substring(0, $MaxCustomDelimiterLen) }
-                    return $val
-                }
+                    $k = [Console]::ReadKey($true)
+                    if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
+                    if ($k.Key -eq [ConsoleKey]::Enter) {
+                        $val = $buf
+                        if ([string]::IsNullOrWhiteSpace($val)) { return $null }
+                        if ($val.Length -gt $MaxCustomDelimiterLen) { $val = $val.Substring(0, $MaxCustomDelimiterLen) }
+                        return $val
+                    }
 
-                if ($k.Key -eq [ConsoleKey]::Backspace) {
-                    if ($buf.Length -gt 0) { $buf = $buf.Substring(0, $buf.Length - 1) }
-                    continue
-                }
-
-                # Allow pasted text and printable characters (including spaces).
-                if ($k.KeyChar -ne [char]0) {
-                    if ($buf.Length -ge $MaxCustomDelimiterLen) {
-                        $warnText  = "Max $MaxCustomDelimiterLen chars"
-                        $warnUntil = (Get-Date).AddMilliseconds(900)
+                    if ($k.Key -eq [ConsoleKey]::Backspace) {
+                        if ($buf.Length -gt 0) { $buf = $buf.Substring(0, $buf.Length - 1); $needsInputRedraw = $true }
                         continue
                     }
-                    $buf += [string]$k.KeyChar
+
+                    # Allow pasted text and printable characters (including spaces).
+                    if ($k.KeyChar -ne [char]0) {
+                        if ($buf.Length -ge $MaxCustomDelimiterLen) {
+                            $warnText  = "Max $MaxCustomDelimiterLen chars"
+                            $warnUntil = (Get-Date).AddMilliseconds(900)
+                            $needsInputRedraw = $true
+                            continue
+                        }
+                        $buf += [string]$k.KeyChar
+                        $needsInputRedraw = $true
+                    }
                 }
+            } finally {
+                try { [Console]::CursorVisible = $false } catch { }
             }
         }
         function _DrawMenu {
@@ -1872,9 +1887,26 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
         $title     = "Set working directory"
         $help1     = "Up/Down: navigate   Enter: open/select   V: select volume   N: new folder   Esc: cancel"
         # (no second header line)
-        $selectedIndex = 0
-        $lastMsg       = ""
-        $toastPending  = $false
+        $selectedIndex       = 0
+        $listTop             = 0
+        $lastRenderedTop     = $null
+        $lastRenderedIndex   = $null
+        $lastRenderedCount   = $null
+        $lastRenderedVisible = $null
+        $lastMsg             = ""
+        $toastPending        = $false
+        $itemsCacheDir       = $null
+        $itemsCacheItems     = $null
+        function _InvalidateItemsCache {
+            Set-Variable -Name itemsCacheDir -Scope 1 -Value $null
+            Set-Variable -Name itemsCacheItems -Scope 1 -Value $null
+        }
+        function _InvalidateListRenderState {
+            Set-Variable -Name lastRenderedTop -Scope 1 -Value $null
+            Set-Variable -Name lastRenderedIndex -Scope 1 -Value $null
+            Set-Variable -Name lastRenderedCount -Scope 1 -Value $null
+            Set-Variable -Name lastRenderedVisible -Scope 1 -Value $null
+        }
         function _SetMsg([string]$m) {
             # NOTE: nested functions run in their own scope; update the parent variables explicitly.
             Set-Variable -Name lastMsg -Scope 1 -Value $m
@@ -2013,6 +2045,10 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
         }
 
         function _GetItems {
+            if (($null -ne $itemsCacheItems) -and ($itemsCacheDir -eq $currentDir)) {
+                return ,$itemsCacheItems
+            }
+
             $items = New-Object System.Collections.Generic.List[string]
 
             # Virtual helper entry (first item when shown):
@@ -2067,6 +2103,8 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 # keep only the leaf name in the list
                 [void]$items.Add($d.Name)
             }
+            Set-Variable -Name itemsCacheDir -Scope 1 -Value $currentDir
+            Set-Variable -Name itemsCacheItems -Scope 1 -Value $items
             return ,$items
         }
 
@@ -2132,43 +2170,83 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 $items        = _GetItems
                 $cursorFolder = _GetCursorFolderDisplay $items $selectedIndex
                 _DrawFrame $currentDir
+                _InvalidateListRenderState
                 _DrawList $items
             } catch { }
         }
 
+        function _DrawListRow([System.Collections.Generic.List[string]]$items, [int]$top, [int]$row) {
+            $innerW = $menuW - 4
+            $idx    = $top + $row
+            $text   = ""
+            if (($idx -ge 0) -and ($idx -lt $items.Count)) { $text = $items[$idx] }
+
+            if ($text.Length -gt $innerW) { $text = $text.Substring(0, $innerW - 3) + "..." }
+            $line = $text.PadRight($innerW)
+
+            $fg = $UI_Color_InputText
+            $bg = $UI_Color_Background
+            if ($idx -eq $selectedIndex) {
+                $fg = $UI_Color_SelectedText
+                $bg = $UI_Color_SelectedBack
+            }
+
+            With-ConsoleColor $fg $bg {
+                Set-UiCursorPosition ($x0 + 2) ($listTopY + $row)
+                [Console]::Write($line)
+            }
+        }
+
         function _DrawList([System.Collections.Generic.List[string]]$items) {
-            $innerW  = $menuW - 4
             $visible = $listLines
 
             if ($selectedIndex -lt 0) { $selectedIndex = 0 }
             if ($selectedIndex -gt ($items.Count - 1)) { $selectedIndex = [Math]::Max(0, $items.Count - 1) }
 
+            $maxTop = [Math]::Max(0, $items.Count - $visible)
             $top = 0
-            if ($selectedIndex -ge $visible) { $top = $selectedIndex - ($visible - 1) }
-            if ($top -gt [Math]::Max(0, $items.Count - $visible)) { $top = [Math]::Max(0, $items.Count - $visible) }
+            try { $top = [int](Get-Variable -Name listTop -Scope 1 -ValueOnly) } catch { $top = 0 }
 
-            for ($row = 0; $row -lt $visible; $row++) {
-                $idx  = $top + $row
-                $text = ""
-                if ($idx -lt $items.Count) { $text = $items[$idx] }
+            if ($top -lt 0) { $top = 0 }
+            if ($top -gt $maxTop) { $top = $maxTop }
 
-                if ($text.Length -gt $innerW) { $text = $text.Substring(0, $innerW - 3) + "..." }
-                $line = $text.PadRight($innerW)
-
-                $fg = $UI_Color_InputText
-                $bg = $UI_Color_Background
-                if ($idx -eq $selectedIndex) {
-                    $fg = $UI_Color_SelectedText
-                    $bg = $UI_Color_SelectedBack
-                }
-
-                With-ConsoleColor $fg $bg {
-                    # The list top differs depending on whether the "Current" line is present.
-                    # Use the computed $listTopY instead of a hard-coded offset.
-                    Set-UiCursorPosition ($x0 + 2) ($listTopY + $row)
-                    [Console]::Write($line)
-                }
+            if ($selectedIndex -lt $top) {
+                $top = $selectedIndex
+            } elseif ($selectedIndex -ge ($top + $visible)) {
+                $top = $selectedIndex - ($visible - 1)
             }
+
+            if ($top -lt 0) { $top = 0 }
+            if ($top -gt $maxTop) { $top = $maxTop }
+            Set-Variable -Name listTop -Scope 1 -Value $top
+
+            $oldTop     = $null
+            $oldIndex   = $null
+            $oldCount   = $null
+            $oldVisible = $null
+            try { $oldTop     = Get-Variable -Name lastRenderedTop -Scope 1 -ValueOnly } catch { }
+            try { $oldIndex   = Get-Variable -Name lastRenderedIndex -Scope 1 -ValueOnly } catch { }
+            try { $oldCount   = Get-Variable -Name lastRenderedCount -Scope 1 -ValueOnly } catch { }
+            try { $oldVisible = Get-Variable -Name lastRenderedVisible -Scope 1 -ValueOnly } catch { }
+
+            $fullDraw = ($null -eq $oldTop) -or ($oldTop -ne $top) -or ($oldCount -ne $items.Count) -or ($oldVisible -ne $visible)
+
+            if ($fullDraw) {
+                for ($row = 0; $row -lt $visible; $row++) {
+                    _DrawListRow $items $top $row
+                }
+            } elseif ($oldIndex -ne $selectedIndex) {
+                $oldRow = [int]$oldIndex - $top
+                $newRow = [int]$selectedIndex - $top
+
+                if (($oldRow -ge 0) -and ($oldRow -lt $visible)) { _DrawListRow $items $top $oldRow }
+                if (($newRow -ge 0) -and ($newRow -lt $visible) -and ($newRow -ne $oldRow)) { _DrawListRow $items $top $newRow }
+            }
+
+            Set-Variable -Name lastRenderedTop -Scope 1 -Value $top
+            Set-Variable -Name lastRenderedIndex -Scope 1 -Value $selectedIndex
+            Set-Variable -Name lastRenderedCount -Scope 1 -Value $items.Count
+            Set-Variable -Name lastRenderedVisible -Scope 1 -Value $visible
 
             if ($toastPending -and -not [string]::IsNullOrEmpty($lastMsg)) {
                 $m = $lastMsg
@@ -2192,8 +2270,6 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
 
             $prompt = "Name: "
             $buf    = ""
-
-            try { [Console]::CursorVisible = $true } catch { }
 
             function _DrawInputBox([string]$textToShow, [switch]$HasOverflow) {
                 Write-At $bx $by       ("┌" + ("─" * ($boxW - 2)) + "┐") ($UI_Color_MenuFrame)
@@ -2260,57 +2336,51 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 Write-At $bx ($by + 4) ("└" + ("─" * ($boxW - 2)) + "┘") ($UI_Color_MenuFrame)
             }
 
-            while ($true) {
-                $full     = $prompt + $buf
-                $overflow = $false
-                $toShow   = $full
+            $needsInputRedraw = $true
+            try {
+                while ($true) {
+                    $full     = $prompt + $buf
+                    $overflow = $false
+                    $toShow   = $full
 
-                $innerW = $boxW - 4
-                if ($toShow.Length -gt $innerW) {
-                    $toShow   = "..." + $toShow.Substring($toShow.Length - ($innerW - 3))
-                    $overflow = $true
-                }
-
-                _DrawInputBox $toShow -HasOverflow:($overflow)
-
-                # Best-effort cursor placement in the input line
-                $cursorX = $bx + 2 + [Math]::Min(($innerW - 1), ($prompt + $buf).Length)
-                $cursorY = $by + 3
-                try { Set-UiCursorPosition $cursorX $cursorY } catch { }
-
-                if (-not [Console]::KeyAvailable) {
-                    Start-Sleep -Milliseconds $UI_ShortSleepMs
-                    Invoke-MenuIdleTick
-                    if ($script:OverlayNeedsRedraw) {
-                        $script:OverlayNeedsRedraw = $false
-                        try { [Console]::CursorVisible = $false } catch { }
-                        try { _DrawInputBox $toShow -HasOverflow:($overflow) } catch { }
+                    $innerW = $boxW - 4
+                    if ($toShow.Length -gt $innerW) {
+                        $toShow   = "..." + $toShow.Substring($toShow.Length - ($innerW - 3))
+                        $overflow = $true
                     }
-                    continue
-                }
-                $k = [Console]::ReadKey($true)
 
-                if ($k.Key -eq [ConsoleKey]::Escape) {
-                    try { [Console]::CursorVisible = $false } catch { }
-                    return $null
-                }
+                    if ($needsInputRedraw) {
+                        _DrawInputBox $toShow -HasOverflow:($overflow)
+                        $needsInputRedraw = $false
+                    }
 
-                if ($k.Key -eq [ConsoleKey]::Enter) {
-                    try { [Console]::CursorVisible = $false } catch { }
-                    $name = $buf.Trim()
-                    if (-not $name) { return $null }
-                    return $name
-                }
+                    $cursorX = $bx + 2 + [Math]::Min(($innerW - 1), ($prompt + $buf).Length)
+                    $cursorY = $by + 3
+                    Set-UiInputCursor $cursorX $cursorY
 
-                if ($k.Key -eq [ConsoleKey]::Backspace) {
-                    if ($buf.Length -gt 0) { $buf = $buf.Substring(0, $buf.Length - 1) }
-                    continue
-                }
+                    $k = [Console]::ReadKey($true)
 
-                # Append printable characters only
-                if ($k.KeyChar -and -not [char]::IsControl($k.KeyChar)) {
-                    $buf += [string]$k.KeyChar
+                    if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
+
+                    if ($k.Key -eq [ConsoleKey]::Enter) {
+                        $name = $buf.Trim()
+                        if (-not $name) { return $null }
+                        return $name
+                    }
+
+                    if ($k.Key -eq [ConsoleKey]::Backspace) {
+                        if ($buf.Length -gt 0) { $buf = $buf.Substring(0, $buf.Length - 1); $needsInputRedraw = $true }
+                        continue
+                    }
+
+                    # Append printable characters only
+                    if ($k.KeyChar -and -not [char]::IsControl($k.KeyChar)) {
+                        $buf += [string]$k.KeyChar
+                        $needsInputRedraw = $true
+                    }
                 }
+            } finally {
+                try { [Console]::CursorVisible = $false } catch { }
             }
         }
 
@@ -2512,9 +2582,9 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
 
         $items        = _GetItems
         $cursorFolder = _GetCursorFolderDisplay $items $selectedIndex
-        _DrawFrame $currentDir
 
-        $needsRedraw = $true
+        $needsRedraw      = $true
+        $frameNeedsRedraw = $true
 
         while ($true) {
 
@@ -2524,7 +2594,11 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 if ($selectedIndex -lt 0) { $selectedIndex = 0 }
 
                 $cursorFolder = _GetCursorFolderDisplay $items $selectedIndex
-                _DrawFrame $currentDir
+                if ($frameNeedsRedraw) {
+                    _DrawFrame $currentDir
+                    _InvalidateListRenderState
+                    $frameNeedsRedraw = $false
+                }
                 _DrawList $items
 
                 $needsRedraw = $false
@@ -2536,7 +2610,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
                     try { [Console]::CursorVisible = $false } catch { }
-                    try { $items = _GetItems; $cursorFolder = _GetCursorFolderDisplay $items $selectedIndex; _DrawFrame $currentDir; _DrawList $items } catch { }
+                    try { $items = _GetItems; $cursorFolder = _GetCursorFolderDisplay $items $selectedIndex; _DrawFrame $currentDir; _InvalidateListRenderState; _DrawList $items } catch { }
                 }
                 continue
             }
@@ -2566,13 +2640,17 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 $root = _PromptSelectVolume
                 if (-not [string]::IsNullOrWhiteSpace($root)) {
                     $currentDir    = $root
+                    _InvalidateItemsCache
                     $selectedIndex = 0
+                    $listTop       = 0
                     $lastMsg       = ""
                     $toastPending  = $false
+                    $frameNeedsRedraw = $true
                 }
 
                 # Always redraw after closing the modal overlay (also on cancel),
                 # otherwise the overlay remains visually on screen until the next repaint.
+                $frameNeedsRedraw = $true
                 $needsRedraw = $true
                 continue
             }
@@ -2580,7 +2658,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             if ($k.Key -eq [ConsoleKey]::N) {
 
                 $name = _PromptNewFolderName
-                if ($null -eq $name) { $lastMsg = ""; $toastPending = $false; $needsRedraw = $true; continue }
+                if ($null -eq $name) { $lastMsg = ""; $toastPending = $false; $frameNeedsRedraw = $true; $needsRedraw = $true; continue }
 
                 # Validate folder name (Windows rules)
                 $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
@@ -2604,8 +2682,11 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     New-Item -ItemType Directory -Path $target -ErrorAction Stop | Out-Null
                     try { $target = (Resolve-Path -LiteralPath $target -ErrorAction Stop).Path } catch { }
                     $currentDir    = $target
+                    _InvalidateItemsCache
                     $selectedIndex = 0
+                    $listTop       = 0
                     _SetMsg "Folder created"
+                    $frameNeedsRedraw = $true
                     $needsRedraw = $true
                 } catch {
                     _SetMsg "Unable to create folder"
@@ -2696,8 +2777,11 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                         try { $parentPath = Split-Path -Path $currentDir -Parent } catch { $parentPath = $null }
                         if (-not [string]::IsNullOrWhiteSpace($parentPath) -and ($parentPath -ne $currentDir) -and (Test-Path -LiteralPath $parentPath)) {
                             $currentDir    = $parentPath
+                            _InvalidateItemsCache
                             $selectedIndex = 0
+                            $listTop       = 0
                             $lastMsg       = ""
+                            $frameNeedsRedraw = $true
                             $needsRedraw   = $true
                         }
                     } catch {
@@ -2711,8 +2795,11 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 if (Test-Path -LiteralPath $target) {
                     try { $target = (Resolve-Path -LiteralPath $target -ErrorAction Stop).Path } catch { }
                     $currentDir    = $target
+                    _InvalidateItemsCache
                     $selectedIndex = 0
+                    $listTop       = 0
                     $lastMsg       = ""
+                    $frameNeedsRedraw = $true
                     $needsRedraw   = $true
                 } else {
                     _SetMsg "Folder not found"
@@ -2895,6 +2982,17 @@ function Set-UiCursorPosition([int]$x, [int]$y) {
     # NOTE: $x/$y are in UI coordinates (0,0 is top-left inside the margins).
     try {
         [Console]::SetCursorPosition($x + $script:UiOffsetX, $y + $script:UiOffsetY)
+    } catch { }
+}
+
+function Set-UiInputCursor([int]$x, [int]$y) {
+    try {
+        $targetX = $x + $script:UiOffsetX
+        $targetY = $y + $script:UiOffsetY
+        if (([Console]::CursorLeft -ne $targetX) -or ([Console]::CursorTop -ne $targetY)) {
+            [Console]::SetCursorPosition($targetX, $targetY)
+        }
+        if (-not [Console]::CursorVisible) { [Console]::CursorVisible = $true }
     } catch { }
 }
 
