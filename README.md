@@ -108,3 +108,7 @@ Then configure Stereo Tool (or another RDS encoder) to read either the ready-mad
 ![UI example](images/ex14.png)
 
 ![UI example](images/ex15.png)
+
+# Disclaimer
+
+Stereo Tool is a product of Thimeo Audio Technology B.V. This project is not affiliated with or endorsed by Thimeo Audio Technology B.V.

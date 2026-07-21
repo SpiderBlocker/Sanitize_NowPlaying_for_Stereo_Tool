@@ -56,6 +56,7 @@
         pre { overflow-x:auto; color:#fff; background:var(--code); border-radius:14px; padding:16px; line-height:1.45; }
         .note { color:var(--muted); font-size:.95rem; }
         footer { margin-top:28px; color:var(--muted); text-align:center; font-size:.92rem; }
+        .disclaimer { max-width:760px; margin:8px auto 0; font-size:.78rem; line-height:1.45; }
         @media (max-width:800px) { .grid, .flow { grid-template-columns:1fr; } .hero { padding:26px; } }
     </style>
 </head>
@@ -82,7 +83,10 @@
             <article class="card wide"><h2>Quick start</h2><p>Download the ZIP from the repository, place the standalone executable in a writable folder, and configure your playout software to write <code>nowplaying.txt</code> to the selected working directory. Then point Stereo Tool to the ready-made RT/RT+ files or to the separate component files required by your workflow.</p><pre><code>conhost.exe "C:\RDS\Sanitize-NowPlaying.exe"</code></pre><p class="note">Using the classic console host is recommended on Windows 11 when predictable console sizing and appearance are preferred over Windows Terminal tabs.</p></article>
             <article class="card wide"><h2>Repository</h2><p>Full documentation, screenshots, source code and the downloadable package are available in the GitHub repository.</p><p><a href="https://github.com/SpiderBlocker/Sanitize_NowPlaying_for_Stereo_Tool">Open Sanitize NowPlaying for Stereo Tool on GitHub</a></p></article>
         </section>
-        <footer><p>© 2026 Loenie · Sanitize NowPlaying for Stereo Tool</p></footer>
+        <footer>
+            <p>© 2026 Loenie · Sanitize NowPlaying for Stereo Tool</p>
+            <p class="disclaimer">Stereo Tool is a product of Thimeo Audio Technology B.V. This project is not affiliated with or endorsed by Thimeo Audio Technology B.V.</p>
+        </footer>
     </main>
 </body>
 </html>
