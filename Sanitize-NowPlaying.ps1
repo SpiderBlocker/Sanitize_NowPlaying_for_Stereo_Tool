@@ -5,10 +5,10 @@
 # Input from Playout software:   %artist<sep>%title   (configurable; default separator U+241F "␟")
 #
 # Outputs for Stereo Tool, all encoded as UTF-8 (no BOM):
-# - nowplaying_prefix.txt    : selected language prefix or custom prefix (or empty)
-# - nowplaying_artist.txt    : sanitized artist, adaptively limited to 64 characters (or empty)
-# - nowplaying_connector.txt : user-defined connector text, padded with one space on each side (only when both fields are present)
-# - nowplaying_title.txt     : sanitized title, adaptively limited to 64 characters (or empty)
+# - prefix.txt    : selected language prefix or custom prefix (or empty)
+# - artist.txt    : sanitized artist, adaptively limited to 64 characters (or empty)
+# - connector.txt : user-defined connector text, padded with one space on each side (only when both fields are present)
+# - title.txt     : sanitized title, adaptively limited to 64 characters (or empty)
 # - nowplaying_rt.txt        : compact RT text, ordered by the Artist/title order setting (or empty)
 # - nowplaying_rtplus.txt    : compact RT+ tagged text, ordered by the Artist/title order setting (or empty)
 #
@@ -239,13 +239,13 @@ $InFile                        = 'C:\RDS\nowplaying.txt'
 $script:InFile                 = $InFile
 $script:StartupInputWasExpired = $false
 
-$PrefixFile           = 'C:\RDS\nowplaying_prefix.txt'
+$PrefixFile           = 'C:\RDS\prefix.txt'
 $script:PrefixFile    = $PrefixFile
-$ArtistFile           = 'C:\RDS\nowplaying_artist.txt'
+$ArtistFile           = 'C:\RDS\artist.txt'
 $script:ArtistFile    = $ArtistFile
-$ConnectorFile        = 'C:\RDS\nowplaying_connector.txt'
+$ConnectorFile        = 'C:\RDS\connector.txt'
 $script:ConnectorFile = $ConnectorFile
-$TitleFile            = 'C:\RDS\nowplaying_title.txt'
+$TitleFile            = 'C:\RDS\title.txt'
 $script:TitleFile     = $TitleFile
 $OutFileRt            = 'C:\RDS\nowplaying_rt.txt'
 $script:OutFileRt     = $OutFileRt
@@ -416,13 +416,13 @@ function Set-WorkDirPaths([string]$dir) {
     # NOTE: Uses the same variable names/assignments as the original inline blocks (behavior-preserving).
     $InFile               = Join-Path $dir 'nowplaying.txt'
     $script:InFile        = $InFile
-    $PrefixFile           = Join-Path $dir 'nowplaying_prefix.txt'
+    $PrefixFile           = Join-Path $dir 'prefix.txt'
     $script:PrefixFile    = $PrefixFile
-    $ArtistFile           = Join-Path $dir 'nowplaying_artist.txt'
+    $ArtistFile           = Join-Path $dir 'artist.txt'
     $script:ArtistFile    = $ArtistFile
-    $ConnectorFile        = Join-Path $dir 'nowplaying_connector.txt'
+    $ConnectorFile        = Join-Path $dir 'connector.txt'
     $script:ConnectorFile = $ConnectorFile
-    $TitleFile            = Join-Path $dir 'nowplaying_title.txt'
+    $TitleFile            = Join-Path $dir 'title.txt'
     $script:TitleFile     = $TitleFile
     $OutFileRt            = Join-Path $dir 'nowplaying_rt.txt'
     $script:OutFileRt     = $OutFileRt
@@ -6314,10 +6314,10 @@ function Write-OutputsAtomic(
 
     $clearAll = [string]::IsNullOrEmpty($rtText)
     $writes = @(
-        [pscustomobject]@{ Label = 'prefix';    Path = $PrefixFile;    Text = $(if ($clearAll) { '' } else { $prefixText });    Temp = '.nowplaying_prefix.tmp' }
-        [pscustomobject]@{ Label = 'artist';    Path = $ArtistFile;    Text = $(if ($clearAll) { '' } else { $artistText });    Temp = '.nowplaying_artist.tmp' }
-        [pscustomobject]@{ Label = 'connector'; Path = $ConnectorFile; Text = $(if ($clearAll) { '' } else { $connectorText }); Temp = '.nowplaying_connector.tmp' }
-        [pscustomobject]@{ Label = 'title';     Path = $TitleFile;     Text = $(if ($clearAll) { '' } else { $titleText });     Temp = '.nowplaying_title.tmp' }
+        [pscustomobject]@{ Label = 'prefix';    Path = $PrefixFile;    Text = $(if ($clearAll) { '' } else { $prefixText });    Temp = '.prefix.tmp' }
+        [pscustomobject]@{ Label = 'artist';    Path = $ArtistFile;    Text = $(if ($clearAll) { '' } else { $artistText });    Temp = '.artist.tmp' }
+        [pscustomobject]@{ Label = 'connector'; Path = $ConnectorFile; Text = $(if ($clearAll) { '' } else { $connectorText }); Temp = '.connector.tmp' }
+        [pscustomobject]@{ Label = 'title';     Path = $TitleFile;     Text = $(if ($clearAll) { '' } else { $titleText });     Temp = '.title.tmp' }
         [pscustomobject]@{ Label = 'RT';        Path = $OutFileRt;     Text = $(if ($clearAll) { '' } else { $rtText });        Temp = '.nowplaying_rt.tmp' }
         [pscustomobject]@{ Label = 'RT+';       Path = $OutFileRtPlus; Text = $(if ($clearAll) { '' } else { $rtPlusText });    Temp = '.nowplaying_rtplus.tmp' }
     )
