@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.0"
+$ScriptVersion = "2.0.1"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -6241,9 +6241,10 @@ function Read-TextRobust([string]$path) {
 }
 
 function Read-NowPlayingStable([string]$path) {
-    $maxWaitMs = 1500
-    $stepMs    = 50
-    $tries     = [Math]::Max(1, [int]($maxWaitMs / $stepMs))
+    $maxWaitMs           = 1500
+    $stepMs              = 50
+    $tries               = [Math]::Max(1, [int]($maxWaitMs / $stepMs))
+    $lastArtistOnlyRaw   = $null
 
     for ($i = 0; $i -lt $tries; $i++) {
         $raw = Read-TextRobust $path
@@ -6256,8 +6257,13 @@ function Read-NowPlayingStable([string]$path) {
 
         $parts = $raw2 -split [regex]::Escape($SepChar), 2
         if ($parts.Count -ge 2) {
+            $a = $parts[0]
             $t = $parts[1]
             if (-not [string]::IsNullOrWhiteSpace($t)) { return $raw }
+            if ([string]::IsNullOrWhiteSpace($a)) { return $raw }
+            if ($null -ne $lastArtistOnlyRaw -and $raw -ceq $lastArtistOnlyRaw) { return $raw }
+
+            $lastArtistOnlyRaw = $raw
             if ($i -lt ($tries - 1)) {
                 Start-Sleep -Milliseconds $stepMs
                 continue
