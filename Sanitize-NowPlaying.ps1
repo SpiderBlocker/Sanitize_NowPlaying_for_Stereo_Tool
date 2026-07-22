@@ -806,8 +806,8 @@ Apply-PrefixFromLanguage
 $MaxLen     = 64
 $DebounceMs = 250
 
-# Heartbeat refresh cadence (seconds).
-$PollTimeoutSec = 1
+# Main-loop idle poll cadence. The heartbeat itself redraws only when its visible value changes.
+$PollIntervalMs = 100
 
 $ReadRetryCount   = 20
 $ReadRetryDelayMs = 50
@@ -1592,17 +1592,29 @@ namespace Win {
     } catch { }
 }
 
+function Read-OverlayKey {
+    $key = [Console]::ReadKey($true)
+
+    # Continuous key-repeat can otherwise starve the menu-idle branch. Refresh any uncovered
+    # heartbeat row once per consumed key so navigation never builds up hidden display lag.
+    try { Update-HeartbeatDuringOverlayIfVisible } catch { }
+
+    return $key
+}
+
 function Read-TextEditorKey {
     while ($true) {
         try {
-            if ([Console]::KeyAvailable) { return [Console]::ReadKey($true) }
+            if ([Console]::KeyAvailable) { return (Read-OverlayKey) }
         } catch {
-            return [Console]::ReadKey($true)
+            return (Read-OverlayKey)
         }
 
-        # Keep input processing and failed-output retries active while a text editor is open.
+        # Keep input processing, failed-output retries and any safely visible heartbeat active
+        # while a text editor is open. The helper restores the editor cursor afterwards.
         try { Do-UpdateIfNeeded } catch { }
         try { [void](Retry-PendingOutputsIfDue) } catch { }
+        try { Update-HeartbeatDuringOverlayIfVisible } catch { }
 
         Start-Sleep -Milliseconds $UI_ShortSleepMs
     }
@@ -2095,7 +2107,7 @@ function Show-LanguageMenu {
                 }
                 continue
             }
-            $k = [Console]::ReadKey($true)
+            $k = Read-OverlayKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) { Restore-UiAfterMenu $y0 $menuH; return $false }
 
@@ -2218,7 +2230,7 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
                 }
                 continue
             }
-            $k = [Console]::ReadKey($true)
+            $k = Read-OverlayKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
             if ($k.Key -eq [ConsoleKey]::UpArrow) {
@@ -2324,7 +2336,7 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
                 continue
             }
 
-            $k = [Console]::ReadKey($true)
+            $k = Read-OverlayKey
             if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
             if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawOrderMenu; continue }
             if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min(1, $selected + 1); _DrawOrderMenu; continue }
@@ -2685,7 +2697,7 @@ function Show-DelimiterMenu {
                 }
                 continue
             }
-            $k = [Console]::ReadKey($true)
+            $k = Read-OverlayKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) { return $false }
             if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawMenu; continue }
@@ -2937,7 +2949,7 @@ function Show-SettingsMenu {
                 }
                 continue
             }
-            $k = [Console]::ReadKey($true)
+            $k = Read-OverlayKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) {
                 # Cancel: restore original settings and re-apply runtime state.
@@ -3729,7 +3741,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     }
                     continue
                 }
-                $k = [Console]::ReadKey($true)
+                $k = Read-OverlayKey
 
                 if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
 
@@ -3827,7 +3839,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 }
                 continue
             }
-            $k = [Console]::ReadKey($true)
+            $k = Read-OverlayKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) {
                 # $null distinguishes cancellation from selecting the already-configured directory ($false).
@@ -4057,20 +4069,124 @@ function Restore-UiAfterMenu([int]$menuTop, [int]$menuHeight) {
         try { Draw-StatusFrame } catch { }
         try { Write-LiveOutputRows } catch { }
 
-        $script:HeartbeatLayoutValid = $false
+        $heartbeatRow    = $script:StatusTop + 9
+        $settingsTop     = $script:StatusTop + 10
+        $settingsBottom  = $script:StatusTop + 12
+        $heartbeatCovered = ($heartbeatRow -ge $yStart -and $heartbeatRow -le $yEnd)
+        $settingsCovered  = ($yEnd -ge $settingsTop -and $yStart -le $settingsBottom)
 
-        try { Ensure-HeartbeatLayout } catch { }
+        if ($heartbeatCovered) {
+            # The row was hidden and must be reconstructed. Its value is calculated directly from
+            # LastGoodUpdate, not from an independently accumulated display state.
+            $script:HeartbeatLayoutValid = $false
+            try { Ensure-HeartbeatLayout } catch { }
+        } elseif ($settingsCovered) {
+            # Restore only the footer rows; keep the already-visible heartbeat and its render cache intact.
+            try { Render-SettingsAndLegend } catch { }
+        }
+
         try { Update-HeartbeatBar } catch { }
     } finally {
         $script:UiOverlayActive = $prevOverlay
     }
 }
 
+function Test-HeartbeatRowVisibleDuringOverlay {
+    # The heartbeat spans the full UI width, so any active dialog touching its row must block the redraw.
+    # Check the complete stack: a small child dialog may leave the row clear while its parent still covers it.
+    if (-not $script:UiOverlayActive) { return $true }
+    if (-not $script:UiInited -or -not $script:HeartbeatLayoutValid) { return $false }
+    if ($null -eq $script:UiDialogStack -or $script:UiDialogStack.Count -le 0) { return $false }
+
+    $heartbeatRow = $script:StatusTop + 9
+    foreach ($dialog in $script:UiDialogStack) {
+        try {
+            $top    = [int]$dialog.Y
+            $height = [Math]::Max(0, [int]$dialog.Height)
+            $bottom = $top + $height - 1
+            if ($height -gt 0 -and $heartbeatRow -ge $top -and $heartbeatRow -le $bottom) { return $false }
+        } catch { return $false }
+    }
+
+    return $true
+}
+
+function Update-HeartbeatDuringOverlayIfVisible {
+    if (-not (Test-HeartbeatRowVisibleDuringOverlay)) { return }
+
+    # Preserve a text editor's live input cursor; ordinary menus normally keep it hidden.
+    $cursorLeft              = 0
+    $cursorTop               = 0
+    $cursorVisible           = $false
+    $cursorPositionCaptured  = $false
+    $cursorVisibilityCaptured = $false
+    try {
+        $cursorLeft             = [Console]::CursorLeft
+        $cursorTop              = [Console]::CursorTop
+        $cursorPositionCaptured = $true
+    } catch { }
+    try {
+        $cursorVisible            = [Console]::CursorVisible
+        $cursorVisibilityCaptured = $true
+    } catch { }
+
+    try {
+        Update-HeartbeatFields
+    } finally {
+        if ($cursorPositionCaptured) {
+            try { [Console]::SetCursorPosition($cursorLeft, $cursorTop) } catch { }
+        }
+        if ($cursorVisibilityCaptured) {
+            try { [Console]::CursorVisible = $cursorVisible } catch { }
+        }
+    }
+}
+
+function Set-NextHeartbeatElapsedRender([int]$ActualAgeSec) {
+    # Anchor redraw scheduling directly to LastGoodUpdate. The display therefore cannot accumulate
+    # a separate lag or perform a catch-up jump when a menu closes.
+    $script:NextHeartbeatElapsedRenderUtc = $script:LastGoodUpdate.ToUniversalTime().AddSeconds([Math]::Max(0, $ActualAgeSec) + 1)
+}
+
+function Get-HeartbeatSleepMilliseconds([int]$MaximumMs) {
+    $maximum = [Math]::Max(1, $MaximumMs)
+    $nextUtc = $script:NextHeartbeatElapsedRenderUtc
+
+    if ($null -eq $nextUtc -or $nextUtc -eq [DateTime]::MinValue) { return $maximum }
+
+    $remainingMs = ($nextUtc - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remainingMs -le 1) { return 1 }
+
+    return [int][Math]::Max(1, [Math]::Min($maximum, [Math]::Ceiling($remainingMs)))
+}
+
+function Wait-WithHeartbeat([int]$Milliseconds) {
+    # Keep the elapsed-time display responsive during deliberate short waits in the single-threaded
+    # input path. This does not process watcher events or run maintenance recursively.
+    $remainingMs = [Math]::Max(0, $Milliseconds)
+
+    while ($remainingMs -gt 0) {
+        $maximumSleepMs = [Math]::Min($PollIntervalMs, $remainingMs)
+        $sleepMs        = Get-HeartbeatSleepMilliseconds $maximumSleepMs
+        Start-Sleep -Milliseconds $sleepMs
+        $remainingMs -= $sleepMs
+
+        try {
+            if ($script:UiOverlayActive) {
+                Update-HeartbeatDuringOverlayIfVisible
+            } elseif ($script:UiInited -and $script:HeartbeatLayoutValid) {
+                Update-HeartbeatFields
+            }
+        } catch { }
+    }
+}
+
 function Invoke-MenuIdleTick {
     # Keep file watching, output publishing and failed-output retries active while an overlay menu is open.
-    # UI updates are suppressed automatically while $script:UiOverlayActive is $true.
+    # The heartbeat may also keep running when every active dialog leaves its row fully uncovered.
     try { Do-UpdateIfNeeded } catch { }
     try { [void](Retry-PendingOutputsIfDue) } catch { }
+    try { Update-HeartbeatDuringOverlayIfVisible } catch { }
 
     try {
         if (Enforce-FixedConsoleLayout) { $script:OverlayNeedsRedraw = $true }
@@ -4345,9 +4461,13 @@ $script:OutputRetryIntervalSec = 2
 # Heartbeat layout (fixed template + field updates to avoid wrap/overdraw artifacts).
 $script:HeartbeatLayoutValid   = $false
 $script:HeartbeatLayoutWidth   = -1
-$script:LastHeartbeatClock     = ""
-$script:LastHeartbeatElapsed   = ""
-$script:LastHeartbeatElapsedFg = $script:BaseFg
+$script:LastHeartbeatClock               = ""
+$script:LastHeartbeatElapsed             = ""
+$script:LastHeartbeatElapsedFg           = $script:BaseFg
+$script:HeartbeatDisplaySourceTicks      = 0L
+$script:NextHeartbeatElapsedRenderUtc    = [DateTime]::MinValue
+$script:NextHeartbeatStateCheckUtc       = [DateTime]::MinValue
+$script:NextIdleMaintenanceUtc           = [DateTime]::MinValue
 
 $script:LastConsoleW = -1
 $script:LastConsoleH = -1
@@ -4856,9 +4976,11 @@ function Ensure-HeartbeatLayout {
         Render-SettingsAndLegend
 
         # Force first field update after (re)layout.
-        $script:LastHeartbeatClock     = ""
-        $script:LastHeartbeatElapsed   = ""
-        $script:LastHeartbeatElapsedFg = $script:BaseFg
+        $script:LastHeartbeatClock            = ""
+        $script:LastHeartbeatElapsed          = ""
+        $script:LastHeartbeatElapsedFg        = $script:BaseFg
+        $script:HeartbeatDisplaySourceTicks   = 0L
+        $script:NextHeartbeatElapsedRenderUtc = [DateTime]::MinValue
 
         $script:HeartbeatLayoutValid = $true
     }
@@ -4941,15 +5063,35 @@ function Update-HeartbeatFields {
     $age = $now - $script:LastGoodUpdate
     if ($age.TotalSeconds -lt 0) { $age = [TimeSpan]::Zero }
 
-    $ageSec   = [int][Math]::Max(0, $age.TotalSeconds)
+    # PowerShell rounds floating-point values when casting to [int]; elapsed seconds must be floored.
+    # Render the real elapsed value directly. Scheduling is tied to the corresponding absolute
+    # LastGoodUpdate boundary, so no independent display counter can lag or catch up later.
+    $actualAgeSec  = [int][Math]::Floor([Math]::Max(0.0, $age.TotalSeconds))
+    $updateTicks   = [int64]$script:LastGoodUpdate.Ticks
+    $sourceChanged = ($updateTicks -ne $script:HeartbeatDisplaySourceTicks)
+
+    if ($sourceChanged) {
+        $script:HeartbeatDisplaySourceTicks = $updateTicks
+    }
+    Set-NextHeartbeatElapsedRender $actualAgeSec
+
     $phase    = [int]$now.Second
-    $healthFg = Get-HealthColor $ageSec $HealthGraceSec $HealthRedAtSec $phase
+    $healthFg = Get-HealthColor $actualAgeSec $HealthGraceSec $HealthRedAtSec $phase
 
     $clock        = $script:LastGoodUpdate.ToString("HH:mm:ss")
-    $elapsedToken = Format-Elapsed $age
+    $elapsedToken = Format-Elapsed ([TimeSpan]::FromSeconds($actualAgeSec))
     $contextWidth = 13
     $contextPart  = $UI_Label_LastUpdate.PadRight($contextWidth)
     $clockPart    = $clock.PadRight($UI_OutputLabelWidth)
+
+    # Avoid unnecessary console writes during the subsecond idle poll and menu processing.
+    # Layout rebuilds clear the cached values, so a restored or resized row is still drawn immediately.
+    if (
+        -not $sourceChanged -and
+        $clock -eq $script:LastHeartbeatClock -and
+        $elapsedToken -eq $script:LastHeartbeatElapsed -and
+        $healthFg -eq $script:LastHeartbeatElapsedFg
+    ) { return }
 
     # Render the entire heartbeat row so suffixes like "ago" always stay directly attached to the elapsed token.
     # This also guarantees that the complete row is restored after any overlay menu has cleared it.
@@ -4973,6 +5115,11 @@ function Update-HeartbeatBar {
     Ensure-UiFresh
     Ensure-HeartbeatLayout
     Update-HeartbeatFields
+
+    # Preserve the former one-second cadence for availability/staleness checks, despite the faster UI poll.
+    $nowUtc = [DateTime]::UtcNow
+    if ($nowUtc -lt $script:NextHeartbeatStateCheckUtc) { return }
+    $script:NextHeartbeatStateCheckUtc = $nowUtc.AddSeconds(1)
 
     # Update the live output block if the input availability/staleness state changed.
     $state = Get-InputUiState
@@ -6238,7 +6385,7 @@ function Read-TextRobust([string]$path) {
         try { return Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop }
         catch {
             try { return Get-Content -LiteralPath $path -Raw -Encoding Default -ErrorAction Stop }
-            catch { Start-Sleep -Milliseconds $ReadRetryDelayMs }
+            catch { Wait-WithHeartbeat $ReadRetryDelayMs }
         }
     }
     return ""
@@ -6269,13 +6416,13 @@ function Read-NowPlayingStable([string]$path) {
 
             $lastArtistOnlyRaw = $raw
             if ($i -lt ($tries - 1)) {
-                Start-Sleep -Milliseconds $stepMs
+                Wait-WithHeartbeat $stepMs
                 continue
             }
             return $raw
         }
 
-        Start-Sleep -Milliseconds $stepMs
+        Wait-WithHeartbeat $stepMs
     }
 
     return (Read-TextRobust $path)
@@ -8144,15 +8291,33 @@ try {
             continue
         }
 
-        $evt = Wait-Event -Timeout $PollTimeoutSec
+        # Wait-Event only supports whole-second timeouts reliably in Windows PowerShell 5.1.
+        # Poll the already-queued events briefly instead, then sleep cooperatively for a subsecond heartbeat cadence.
+        $evt = Wait-Event -Timeout 0
 
         if ($script:Stopping) { break }
 
         if ($null -eq $evt) {
+            $sleepMs = Get-HeartbeatSleepMilliseconds $PollIntervalMs
+            Start-Sleep -Milliseconds $sleepMs
+            if ($script:Stopping) { break }
+
+            # Recheck after the cooperative sleep so a watcher event that arrived meanwhile is handled
+            # through the normal debounce path instead of first being picked up by the fallback stamp check.
+            $evt = Wait-Event -Timeout 0
+        }
+
+        if ($null -eq $evt) {
             if (Handle-Hotkeys) { Do-Update }
             try { Update-HeartbeatBar } catch { }
-            Do-UpdateIfNeeded
-            try { [void](Retry-PendingOutputsIfDue) } catch { }
+
+            # Keep the previous one-second cadence for the fallback input-stamp check and output retry scheduler.
+            $nowUtc = [DateTime]::UtcNow
+            if ($nowUtc -ge $script:NextIdleMaintenanceUtc) {
+                $script:NextIdleMaintenanceUtc = $nowUtc.AddSeconds(1)
+                Do-UpdateIfNeeded
+                try { [void](Retry-PendingOutputsIfDue) } catch { }
+            }
             continue
         }
 
@@ -8165,7 +8330,7 @@ try {
 
         Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
 
-        Start-Sleep -Milliseconds $DebounceMs
+        Wait-WithHeartbeat $DebounceMs
 
         while ($true) {
             $evt2 = Wait-Event -Timeout 0
