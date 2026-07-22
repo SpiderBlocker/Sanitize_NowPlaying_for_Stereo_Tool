@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.2"
+$ScriptVersion = "2.0.3"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -5813,18 +5813,22 @@ function Strip-CountrySuffix([string]$s) {
         $name2 = Cleanup-Whitespace $m2.Groups["name"].Value
         $tag2  = Cleanup-Whitespace $m2.Groups["tag"].Value
 
+        # Short ISO-style codes are only unambiguous when written entirely in uppercase.
+        if ($tag2 -match '^[A-Za-z]{2,3}$' -and $tag2 -cne $tag2.ToUpperInvariant()) { return $t }
+
         if (-not [string]::IsNullOrWhiteSpace($name2) -and (Test-IsCountryToken $tag2)) {
             return $name2
         }
     }
 
     # --- 3) Hyphen/ndash/mdash suffixes: " - Country" / " – Country" / " — Country" ---
-    $m3 = [regex]::Match($t, '^(?<name>.+?)\s*[-–—]\s*(?<tag>[^-–—]+?)\s*$')
+    # Require whitespace on both sides so hyphenated names such as "MO-DO" remain untouched.
+    $m3 = [regex]::Match($t, '^(?<name>.+?)\s+[-–—]\s+(?<tag>[^-–—]+?)\s*$')
     if ($m3.Success) {
         $name3 = Cleanup-Whitespace $m3.Groups["name"].Value
         $tag3  = Cleanup-Whitespace $m3.Groups["tag"].Value
 
-        if ($tag3 -match '^[A-Za-z]{2}$' -and $tag3 -cne $tag3.ToUpperInvariant()) { return $t }
+        if ($tag3 -match '^[A-Za-z]{2,3}$' -and $tag3 -cne $tag3.ToUpperInvariant()) { return $t }
 
         if (-not [string]::IsNullOrWhiteSpace($name3) -and (Test-IsCountryToken $tag3)) {
             return $name3
@@ -7499,16 +7503,22 @@ function Remove-ArtistRegionSuffix([string]$artist) {
         $name2 = Cleanup-Whitespace $m2.Groups["name"].Value
         $tag2  = Cleanup-Whitespace $m2.Groups["tag"].Value
 
+        # Short ISO-style codes are only unambiguous when written entirely in uppercase.
+        if ($tag2 -match '^[A-Za-z]{2,3}$' -and $tag2 -cne $tag2.ToUpperInvariant()) { return $t }
+
         if (-not [string]::IsNullOrWhiteSpace($name2) -and (Test-IsCountryToken $tag2)) {
             return $name2
         }
     }
 
     # --- 3) Hyphen/ndash/mdash suffixes: " - Country" / " – Country" / " — Country" ---
-    $m3 = [regex]::Match($t, '^(?<name>.+?)\s*[-–—]\s*(?<tag>[^-–—]+?)\s*$')
+    # Require whitespace on both sides so hyphenated names such as "MO-DO" remain untouched.
+    $m3 = [regex]::Match($t, '^(?<name>.+?)\s+[-–—]\s+(?<tag>[^-–—]+?)\s*$')
     if ($m3.Success) {
         $name3 = Cleanup-Whitespace $m3.Groups["name"].Value
         $tag3  = Cleanup-Whitespace $m3.Groups["tag"].Value
+
+        if ($tag3 -match '^[A-Za-z]{2,3}$' -and $tag3 -cne $tag3.ToUpperInvariant()) { return $t }
 
         if (-not [string]::IsNullOrWhiteSpace($name3) -and (Test-IsCountryToken $tag3)) {
             return $name3
