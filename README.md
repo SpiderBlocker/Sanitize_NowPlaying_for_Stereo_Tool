@@ -77,6 +77,17 @@ Use the F10 menu to configure the working directory, prefix text, artist/title o
 Then configure Stereo Tool (or another RDS encoder) to read either the ready-made RT/RT+ files or the separate component files required by your workflow.
 
 
+# Stereo Tool component example
+
+The separate component files can be combined as an alternating RadioText sequence in Stereo Tool. The following example can be used as a starting point:
+
+    5s:\r"C:\RDS\nowplaying_prefix.txt"/10s:\+AR\r"C:\RDS\nowplaying_artist.txt"\-/5s:\r"C:\RDS\nowplaying_connector.txt"/10s:\+TI\r"C:\RDS\nowplaying_title.txt"\-
+
+This displays the prefix for 5 seconds, the artist for 10 seconds with an RT+ artist tag, the connector for 5 seconds, and the title for 10 seconds with an RT+ title tag. Adjust the timings, paths and order to suit your own RDS presentation.
+
+**Synchronization note:** Stereo Tool reads each referenced component file only when that particular section becomes active, rather than caching all files at the start of the sequence. If the song changes during the sequence, artist and title components from two adjacent songs can therefore be combined. The sanitizer replaces each individual file atomically, but cannot make several separately read files act as one shared snapshot. Use the ready-made RT/RT+ files when guaranteed artist/title consistency is more important than separate component rotation.
+
+
 # Example screenshots
 
 ![UI example](images/ex01.png)
