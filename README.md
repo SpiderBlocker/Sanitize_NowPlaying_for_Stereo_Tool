@@ -81,7 +81,7 @@ Then configure Stereo Tool (or another RDS encoder) to read either the ready-mad
 
 The separate component files can be combined as an alternating RadioText sequence in Stereo Tool. The following example can be used as a starting point:
 
-    5s:\r"C:\RDS\nowplaying_prefix.txt"/10s:\+AR\r"C:\RDS\nowplaying_artist.txt"\-/5s:\r"C:\RDS\nowplaying_connector.txt"/10s:\+TI\r"C:\RDS\nowplaying_title.txt"\-
+    5s:\r"C:\RDS\prefix.txt"/10s:\+AR\r"C:\RDS\artist.txt"\-/5s:\r"C:\RDS\connector.txt"/10s:\+TI\r"C:\RDS\title.txt"\-
 
 This displays the prefix for 5 seconds, the artist for 10 seconds with an RT+ artist tag, the connector for 5 seconds, and the title for 10 seconds with an RT+ title tag. Adjust the timings, paths and order to suit your own RDS presentation.
 
