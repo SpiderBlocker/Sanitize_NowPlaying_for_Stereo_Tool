@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.3"
+$ScriptVersion = "2.0.4"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -224,11 +224,11 @@ $UI_Label_CompactRtPlus = 'COMPACT RT+'
 $UI_Label_LastUpdate = 'LAST UPDATE'
 
 # Timing
-$UI_ShortSleepMs               = 10    # Milliseconds
+$UI_ShortSleepMs               = 10    # Milliseconds; lightweight key polling only
+$UI_OverlayHeartbeatPollMs     = 100   # Keep the visible elapsed-time row responsive during a dialog
+$UI_OverlayMaintenancePollMs   = 500   # Input/output maintenance while a dialog is open
+$UI_OverlayConsolePollMs       = 500   # Console-layout maintenance while a dialog is open
 $UI_ToastDurationMs            = 1400  # Milliseconds
-$UI_WarningDurationShortMs     = 900   # Milliseconds
-$UI_WarningDurationNormalMs    = 1400  # Milliseconds
-$UI_WarningDurationLongMs      = 1800  # Milliseconds
 $UI_StartupToastDurationSec    = 2     # Seconds
 $StartupPublishFreshSec        = 180   # Seconds
 
@@ -355,7 +355,7 @@ function Load-Settings {
     Save-Settings
 }
 
-function Ensure-Directory([string]$dir, [string]$purpose) {
+function Ensure-Directory([string]$dir) {
     if ([string]::IsNullOrWhiteSpace($dir)) { return $false }
     if (Test-Path -LiteralPath $dir) {
         return (Test-Path -LiteralPath $dir -PathType Container)
@@ -379,7 +379,7 @@ function Ensure-WorkDirOrFallback {
     try { $wizardDone = [bool]$script:Settings.WorkDirWizardDone } catch { $wizardDone = $false }
 
     if ($wanted -and (Test-Path -LiteralPath $wanted -PathType Container)) { return $wanted }
-    if ($wanted -and $wizardDone -and (Ensure-Directory $wanted "WorkDir")) { return $wanted }
+    if ($wanted -and $wizardDone -and (Ensure-Directory $wanted)) { return $wanted }
 
     # Fallbacks that are typically writable without admin rights.
     $candidates = @()
@@ -397,7 +397,7 @@ function Ensure-WorkDirOrFallback {
     } catch { }
 
     foreach ($c in $candidates) {
-        if (Ensure-Directory $c "Fallback WorkDir") {
+        if (Ensure-Directory $c) {
             # Persist and switch all IO paths to the fallback directory.
             $script:Settings.WorkDir           = $c
             $script:Settings.WorkDirWizardDone = $true
@@ -437,7 +437,7 @@ function Apply-WorkDirIfConfigured {
     if (-not $script:Settings.WorkDir) { return }
     $dir = $script:Settings.WorkDir.Trim()
     if (-not $dir) { return }
-    if (-not (Ensure-Directory $dir "Configured WorkDir")) { return }
+    if (-not (Ensure-Directory $dir)) { return }
     $script:Settings.WorkDir = $dir
 
     Set-WorkDirPaths $dir
@@ -1611,12 +1611,10 @@ function Read-TextEditorKey {
         }
 
         # Keep input processing, failed-output retries and any safely visible heartbeat active
-        # while a text editor is open. The helper restores the editor cursor afterwards.
-        try { Do-UpdateIfNeeded } catch { }
-        try { [void](Retry-PendingOutputsIfDue) } catch { }
-        try { Update-HeartbeatDuringOverlayIfVisible } catch { }
+        # while a text editor is open. Expensive work is throttled independently from key polling.
+        try { Invoke-OverlayDataIdleTick } catch { }
 
-        Start-Sleep -Milliseconds $UI_ShortSleepMs
+        [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
     }
 }
 
@@ -1717,7 +1715,7 @@ Disable-ConsoleQuickEdit
 
 # Suppress conhost's built-in Ctrl+A / Select All action before it can affect the UI.
 # The blocker is scoped to this console window and is removed again during shutdown.
-$script:ConsoleCtrlABlockerInstalled = Install-ConsoleCtrlABlocker
+[void](Install-ConsoleCtrlABlocker)
 
 # Font changing via SetCurrentConsoleFontEx is known to be unstable on some console hosts.
 # Only attempt it in classic conhost sessions (best-effort).
@@ -1985,7 +1983,7 @@ function Show-LanguageMenu {
         $winH = Get-UiAvailableHeight 10
 
         $title = "Select prefix text"
-        $help  = $(if ($StageOnly) { "Up/Down: move   Enter: select   $UI_HelpCancel" } else { "Up/Down: move   Enter: apply   $UI_HelpCancel" })
+        $help  = "Up/Down: move   Enter: apply   $UI_HelpCancel"
         $menuH = [Math]::Min($winH - 6, 18)
         $menuW = Get-UiDialogWidth $winW 78 52 $title $help -dialogHeight $menuH
         $x0    = Get-UiCenteredStart $winW $menuW
@@ -2014,9 +2012,9 @@ function Show-LanguageMenu {
             $top  = [Math]::Max(0, [Math]::Min($PrefixLanguages.Count - $listH0, $selected - $half))
         }
 
-        function _DrawMenu {
-            # Border and title
-            Draw-MenuFrame $x0 $y0 $menuW $title $help
+        function _DrawMenu([switch]$ContentOnly) {
+            # Border and title are stable during navigation.
+            if (-not $ContentOnly) { Draw-MenuFrame $x0 $y0 $menuW $title $help }
 
             $listH = $menuH - 5
             for ($i = 0; $i -lt $listH; $i++) {
@@ -2032,7 +2030,7 @@ function Show-LanguageMenu {
                         Set-UiCursorPosition $x0 $lineY
                         [Console]::Write($UI_Frame_Vertical)
                     }
-                    With-ConsoleColor $itemFg $borderBg {
+                    With-ConsoleColor $UI_Color_MenuLabel $borderBg {
                         Set-UiCursorPosition ($x0 + 1) $lineY
                         [Console]::Write((" " * ($menuW - 2)))
                     }
@@ -2098,7 +2096,7 @@ function Show-LanguageMenu {
         _DrawMenu
         while ($true) {
             if (-not [Console]::KeyAvailable) {
-                Start-Sleep -Milliseconds $UI_ShortSleepMs
+                [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                 Invoke-MenuIdleTick
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
@@ -2145,7 +2143,8 @@ function Show-LanguageMenu {
             if ($selected -lt $top) { $top = $selected }
             if ($selected -ge ($top + $listH)) { $top = $selected - $listH + 1 }
 
-            _DrawMenu
+            # Navigation changes only the list; keep the unchanged header/frame stable.
+            _DrawMenu -ContentOnly
         }
     } finally {
         Pop-UiDialogGeometry $dialogToken
@@ -2162,7 +2161,7 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
 
         $winW  = [Math]::Max(44, ([Console]::WindowWidth - $script:UiOffsetX - $script:UiRightMargin))
         $winH  = Get-UiAvailableHeight 10
-        $help  = $(if ($StageOnly) { "Up/Down: move   Enter: select   $UI_HelpCancel" } else { "Up/Down: move   Enter: apply   $UI_HelpCancel" })
+        $help  = "Up/Down: move   Enter: apply   $UI_HelpCancel"
         $items = @(
         @{ Label = "ON";  Value = $true  }
         @{ Label = "OFF"; Value = $false }
@@ -2175,8 +2174,8 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $selected = $(if ($currentValue) { 0 } else { 1 })
-        function _DrawMenu {
-            Draw-MenuFrame $x0 $y0 $menuW $title $help
+        function _DrawMenu([switch]$ContentOnly) {
+            if (-not $ContentOnly) { Draw-MenuFrame $x0 $y0 $menuW $title $help }
 
             $borderFg = $UI_Color_MenuFrame
             $borderBg = $script:BaseBg
@@ -2221,7 +2220,7 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
 
         while ($true) {
             if (-not [Console]::KeyAvailable) {
-                Start-Sleep -Milliseconds $UI_ShortSleepMs
+                [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                 Invoke-MenuIdleTick
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
@@ -2241,10 +2240,10 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
                     if (_IsSelectableIndex $n) { $selected = $n; break }
                     if ($n -le 0) { break }
                 }
-                _DrawMenu
+                _DrawMenu -ContentOnly
                 continue
             }
-            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min(1, $selected + 1); _DrawMenu; continue }
+            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min(1, $selected + 1); _DrawMenu -ContentOnly; continue }
 
             if ($k.Key -eq [ConsoleKey]::Enter) {
                 return [bool]$items[$selected].Value
@@ -2286,8 +2285,8 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
         $normalizedCurrent = Normalize-ArtistTitleOrder $currentOrder
         $selected = $(if ($normalizedCurrent -eq 'TITLE_ARTIST') { 1 } else { 0 })
 
-        function _DrawOrderMenu {
-            Draw-MenuFrame $x0 $y0 $menuW $title $help
+        function _DrawOrderMenu([switch]$ContentOnly) {
+            if (-not $ContentOnly) { Draw-MenuFrame $x0 $y0 $menuW $title $help }
             $borderFg = $UI_Color_MenuFrame
             $borderBg = $script:BaseBg
 
@@ -2326,7 +2325,7 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
         _DrawOrderMenu
         while ($true) {
             if (-not [Console]::KeyAvailable) {
-                Start-Sleep -Milliseconds $UI_ShortSleepMs
+                [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                 Invoke-MenuIdleTick
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
@@ -2338,8 +2337,8 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
 
             $k = Read-OverlayKey
             if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
-            if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawOrderMenu; continue }
-            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min(1, $selected + 1); _DrawOrderMenu; continue }
+            if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawOrderMenu -ContentOnly; continue }
+            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min(1, $selected + 1); _DrawOrderMenu -ContentOnly; continue }
             if ($k.Key -eq [ConsoleKey]::Enter) { return [string]$items[$selected].Value }
         }
     } finally {
@@ -2360,7 +2359,7 @@ function Show-DelimiterMenu {
         $winH = Get-UiAvailableHeight 10
 
         $title = "Playout delimiter"
-        $help  = $(if ($StageOnly) { "Up/Down: move   Enter: select   $UI_HelpCancel" } else { "Up/Down: move   Enter: apply   $UI_HelpCancel" })
+        $help  = "Up/Down: move   Enter: apply   $UI_HelpCancel"
 
         # Current custom delimiter (if any), for display purposes.
         $curCustom = ''
@@ -2628,8 +2627,8 @@ function Show-DelimiterMenu {
                 try { [Console]::CursorVisible = $false } catch { }
             }
         }
-        function _DrawMenu {
-            Draw-MenuFrame $x0 $y0 $menuW $title $help
+        function _DrawMenu([switch]$ContentOnly) {
+            if (-not $ContentOnly) { Draw-MenuFrame $x0 $y0 $menuW $title $help }
 
             $borderFg = $UI_Color_MenuFrame
             $borderBg = $script:BaseBg
@@ -2688,7 +2687,7 @@ function Show-DelimiterMenu {
 
         while ($true) {
             if (-not [Console]::KeyAvailable) {
-                Start-Sleep -Milliseconds $UI_ShortSleepMs
+                [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                 Invoke-MenuIdleTick
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
@@ -2700,8 +2699,8 @@ function Show-DelimiterMenu {
             $k = Read-OverlayKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) { return $false }
-            if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawMenu; continue }
-            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min($items.Count - 1, $selected + 1); _DrawMenu; continue }
+            if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawMenu -ContentOnly; continue }
+            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min($items.Count - 1, $selected + 1); _DrawMenu -ContentOnly; continue }
 
             if ($k.Key -eq [ConsoleKey]::Enter) {
                 $newKey  = "$($items[$selected].Key)".Trim().ToUpperInvariant()
@@ -2792,8 +2791,8 @@ function Show-SettingsMenu {
             return $true
         }
 
-        function _DrawMenu {
-            Draw-MenuFrame $x0 $y0 $menuW $title $help
+        function _DrawMenu([switch]$ContentOnly) {
+            if (-not $ContentOnly) { Draw-MenuFrame $x0 $y0 $menuW $title $help }
 
             $borderFg = $UI_Color_MenuFrame
             $borderBg = $script:BaseBg
@@ -2940,7 +2939,7 @@ function Show-SettingsMenu {
 
         while ($true) {
             if (-not [Console]::KeyAvailable) {
-                Start-Sleep -Milliseconds $UI_ShortSleepMs
+                [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                 Invoke-MenuIdleTick
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
@@ -2970,8 +2969,8 @@ function Show-SettingsMenu {
 
                 return $false
             }
-            if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawMenu; continue }
-            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min($items.Count - 1, $selected + 1); _DrawMenu; continue }
+            if ($k.Key -eq [ConsoleKey]::UpArrow)   { $selected = [Math]::Max(0, $selected - 1); _DrawMenu -ContentOnly; continue }
+            if ($k.Key -eq [ConsoleKey]::DownArrow) { $selected = [Math]::Min($items.Count - 1, $selected + 1); _DrawMenu -ContentOnly; continue }
 
             if ($k.Key -eq [ConsoleKey]::Enter) {
 
@@ -3672,14 +3671,15 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             $sel = 0
             $top = 0
 
-            function _DrawVolBox {
-                Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
-
+            function _DrawVolBox([switch]$ContentOnly) {
                 $innerW    = $boxW - 4
                 $titleLine = "Select volume"
                 $helpLine  = "Up/Down: move   Enter: select   $UI_HelpCancel"
 
-                With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
+                if (-not $ContentOnly) {
+                    Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
+
+                    With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
                     Set-UiCursorPosition $bx ($by + 1)
                     [Console]::Write($UI_Frame_Vertical + " ")
                     Set-UiCursorPosition ($bx + $boxW - 2) ($by + 1)
@@ -3690,10 +3690,11 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     Set-UiCursorPosition ($bx + $boxW - 2) ($by + 2)
                     [Console]::Write(" " + $UI_Frame_Vertical)
                 }
-                Write-UiHeaderContent ($bx + 2) ($by + 1) $innerW $titleLine $helpLine
-                Write-At ($bx + 2) ($by + 2) (" " * $innerW) $UI_Color_DimText
+                    Write-UiHeaderContent ($bx + 2) ($by + 1) $innerW $titleLine $helpLine
+                    Write-At ($bx + 2) ($by + 2) (" " * $innerW) $UI_Color_DimText
 
-                Write-At $bx ($by + 3) ($UI_Frame_MiddleLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_MiddleRight) ($UI_Color_MenuFrame)
+                    Write-At $bx ($by + 3) ($UI_Frame_MiddleLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_MiddleRight) ($UI_Color_MenuFrame)
+                }
 
                 # List
                 $innerWList = $boxW - 4
@@ -3732,7 +3733,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
 
             while ($true) {
                 if (-not [Console]::KeyAvailable) {
-                    Start-Sleep -Milliseconds $UI_ShortSleepMs
+                    [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                     Invoke-MenuIdleTick
                     if ($script:OverlayNeedsRedraw) {
                         $script:OverlayNeedsRedraw = $false
@@ -3749,7 +3750,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     $sel--
                     if ($sel -lt 0) { $sel = 0 }
                     if ($sel -lt $top) { $top = $sel }
-                    _DrawVolBox
+                    _DrawVolBox -ContentOnly
                     continue
                 }
 
@@ -3759,7 +3760,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     if ($sel -ge ($top + $listCount)) { $top = $sel - ($listCount - 1) }
                     if ($top -lt 0) { $top = 0 }
                     if ($top -gt [Math]::Max(0, $drives.Count - $listCount)) { $top = [Math]::Max(0, $drives.Count - $listCount) }
-                    _DrawVolBox
+                    _DrawVolBox -ContentOnly
                     continue
                 }
 
@@ -3830,7 +3831,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             }
 
             if (-not [Console]::KeyAvailable) {
-                Start-Sleep -Milliseconds $UI_ShortSleepMs
+                [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                 Invoke-MenuIdleTick
                 if ($script:OverlayNeedsRedraw) {
                     $script:OverlayNeedsRedraw = $false
@@ -4168,7 +4169,7 @@ function Wait-WithHeartbeat([int]$Milliseconds) {
     while ($remainingMs -gt 0) {
         $maximumSleepMs = [Math]::Min($PollIntervalMs, $remainingMs)
         $sleepMs        = Get-HeartbeatSleepMilliseconds $maximumSleepMs
-        Start-Sleep -Milliseconds $sleepMs
+        [System.Threading.Thread]::Sleep($sleepMs)
         $remainingMs -= $sleepMs
 
         try {
@@ -4181,12 +4182,35 @@ function Wait-WithHeartbeat([int]$Milliseconds) {
     }
 }
 
+function Invoke-OverlayDataIdleTick {
+    # The first-run working-directory dialog appears before the runtime UI and watcher exist.
+    # No playout or heartbeat maintenance is meaningful at that stage.
+    if (-not $script:UiInited) { return }
+
+    # Keep the visible elapsed-time row responsive without coupling it to the more expensive
+    # input-stamp and failed-output checks. Those checks can run at a slower cadence.
+    $nowUtc = [DateTime]::UtcNow
+
+    if ($nowUtc -ge $script:NextOverlayMaintenancePollUtc) {
+        $script:NextOverlayMaintenancePollUtc = $nowUtc.AddMilliseconds($UI_OverlayMaintenancePollMs)
+        try { Do-UpdateIfNeeded } catch { }
+        try { [void](Retry-PendingOutputsIfDue) } catch { }
+    }
+
+    if ($nowUtc -ge $script:NextOverlayHeartbeatPollUtc) {
+        $script:NextOverlayHeartbeatPollUtc = $nowUtc.AddMilliseconds($UI_OverlayHeartbeatPollMs)
+        try { Update-HeartbeatDuringOverlayIfVisible } catch { }
+    }
+}
+
 function Invoke-MenuIdleTick {
-    # Keep file watching, output publishing and failed-output retries active while an overlay menu is open.
-    # The heartbeat may also keep running when every active dialog leaves its row fully uncovered.
-    try { Do-UpdateIfNeeded } catch { }
-    try { [void](Retry-PendingOutputsIfDue) } catch { }
-    try { Update-HeartbeatDuringOverlayIfVisible } catch { }
+    # Keep background processing active while an overlay menu is open, without repeatedly querying
+    # file metadata or console properties at the fast key-polling cadence.
+    Invoke-OverlayDataIdleTick
+
+    $nowUtc = [DateTime]::UtcNow
+    if ($nowUtc -lt $script:NextOverlayConsolePollUtc) { return }
+    $script:NextOverlayConsolePollUtc = $nowUtc.AddMilliseconds($UI_OverlayConsolePollMs)
 
     try {
         if (Enforce-FixedConsoleLayout) { $script:OverlayNeedsRedraw = $true }
@@ -4439,10 +4463,13 @@ function Write-AtSegments([int]$x, [int]$y, [object[]]$segments, [ConsoleColor]$
 
 # -------------------- Console layout -----------------------------------------
 
-$script:UiInited           = $false
-$script:UiOverlayActive    = $false
-$script:OverlayNeedsRedraw = $false
-$script:HeaderTop          = 0
+$script:UiInited                   = $false
+$script:UiOverlayActive            = $false
+$script:OverlayNeedsRedraw         = $false
+$script:NextOverlayHeartbeatPollUtc   = [DateTime]::MinValue
+$script:NextOverlayMaintenancePollUtc = [DateTime]::MinValue
+$script:NextOverlayConsolePollUtc     = [DateTime]::MinValue
+$script:HeaderTop                  = 0
 
 $script:HeaderLineCount = 12
 $script:StatusLineCount = 13
@@ -4496,8 +4523,9 @@ $script:LastRtTextShown      = ""
 $script:LastRtPlusTextShown  = ""
 $script:LastInputUiState     = ""
 
-
-$script:LastMetadataValid = $false
+# True once the static CONTENT labels/separators have been rendered for the current UI layout.
+$script:LiveOutputLayoutValid = $false
+$script:LastMetadataValid     = $false
 
 function Test-OutputWriteFailed([string]$label) {
     if ($null -eq $script:LastWriteFailures) { return $false }
@@ -4505,7 +4533,8 @@ function Test-OutputWriteFailed([string]$label) {
 }
 
 function Write-LiveOutputRows {
-    # Use the same thirteen-column context area as LOCATION, FILES and LAST UPDATE.
+    # Full CONTENT-block render. Used only for initial layout, resize and overlay restoration.
+    # Labels and separators are static; only the values use state-dependent colors.
     $contextWidth = 13
     $contentPart  = 'CONTENT'.PadRight($contextWidth)
     $indentPart   = (' ' * $contextWidth)
@@ -4519,34 +4548,85 @@ function Write-LiveOutputRows {
     $labRt = Get-PaddedOutputLabel $UI_Label_CompactRt
     $labRp = Get-PaddedOutputLabel $UI_Label_CompactRtPlus
 
-    $rawInput    = [string]$script:LastRawInputShown
-    $prefixOut   = [string]$script:LastPrefixOutShown
-    $artistOut   = [string]$script:LastArtistShown
+    $rawInput     = [string]$script:LastRawInputShown
+    $prefixOut    = [string]$script:LastPrefixOutShown
+    $artistOut    = [string]$script:LastArtistShown
     $connectorOut = [string]$script:LastConnectorShown
-    $titleOut    = [string]$script:LastTitleShown
-    $rtText      = [string]$script:LastRtTextShown
-    $rtPlusText  = [string]$script:LastRtPlusTextShown
+    $titleOut     = [string]$script:LastTitleShown
+    $rtText       = [string]$script:LastRtTextShown
+    $rtPlusText   = [string]$script:LastRtPlusTextShown
 
     if ($rawInput) {
         $rawInput = $rawInput.Replace([string]$SepChar, [string]$SepGlyph)
     }
 
-    Write-SegmentedLine 0 ($script:StatusTop + 1) $contentPart $UI_Color_SectionTitle $labIn $script:LastInFg $sepPart $UI_Color_FieldSeparator $rawInput $script:LastInFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 2) $indentPart $script:BaseFg $labPx $script:LastPxFg $sepPart $UI_Color_FieldSeparator $prefixOut $script:LastPxFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 1) $contentPart $UI_Color_SectionTitle $labIn $UI_Color_Input     $sepPart $UI_Color_FieldSeparator $rawInput $script:LastInFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 2) $indentPart  $script:BaseFg          $labPx $UI_Color_Prefix    $sepPart $UI_Color_FieldSeparator $prefixOut $script:LastPxFg $true
 
     if (Test-TitleFirstOrder) {
-        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labTi $script:LastTitleFg     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
-        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $script:LastConnectorFg $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
-        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labAr $script:LastArtistFg    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
+        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labTi $UI_Color_Title     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
+        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $UI_Color_Connector $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
+        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labAr $UI_Color_Artist    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
     } else {
-        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $script:LastArtistFg    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
-        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $script:LastConnectorFg $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
-        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $script:LastTitleFg     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
+        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $UI_Color_Artist    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
+        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $UI_Color_Connector $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
+        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $UI_Color_Title     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
     }
 
-    Write-SegmentedLine 0 ($script:StatusTop + 6) $indentPart $script:BaseFg $labRt $script:LastRtFg $sepPart $UI_Color_FieldSeparator $rtText     $script:LastRtFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 7) $indentPart $script:BaseFg $labRp $script:LastRpFg $sepPart $UI_Color_FieldSeparator $rtPlusText $script:LastRpFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 6) $indentPart $script:BaseFg $labRt $UI_Color_RT     $sepPart $UI_Color_FieldSeparator $rtText     $script:LastRtFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 7) $indentPart $script:BaseFg $labRp $UI_Color_RTPlus $sepPart $UI_Color_FieldSeparator $rtPlusText $script:LastRpFg $true
     Write-At 0 ($script:StatusTop + 8) "" $script:BaseFg $true
+
+    $script:LiveOutputLayoutValid = $true
+}
+
+function Write-LiveOutputValue([int]$y, [string]$text, [ConsoleColor]$fg) {
+    # Update only the variable value area, preserving CONTENT, field labels and separators.
+    $contextWidth = 13
+    $valueX       = $contextWidth + $UI_OutputLabelWidth + 2  # ': '
+    $w            = Get-UiWidth $UI_MinRenderWidth
+    $max          = [Math]::Max(0, $w - $valueX - 1)
+    if ($max -le 0) { return }
+
+    $value = Pad-OrEllipsize ([string]$text) $max
+    try { Write-At $valueX $y ($value.PadRight($max)) $fg $false } catch { }
+}
+
+function Write-LiveOutputValues {
+    # Normal metadata refresh: redraw values only. Fall back to a full render when the
+    # static layout has not yet been built or was invalidated by a complete UI redraw.
+    if (-not $script:LiveOutputLayoutValid) {
+        Write-LiveOutputRows
+        return
+    }
+
+    $rawInput     = [string]$script:LastRawInputShown
+    $prefixOut    = [string]$script:LastPrefixOutShown
+    $artistOut    = [string]$script:LastArtistShown
+    $connectorOut = [string]$script:LastConnectorShown
+    $titleOut     = [string]$script:LastTitleShown
+    $rtText       = [string]$script:LastRtTextShown
+    $rtPlusText   = [string]$script:LastRtPlusTextShown
+
+    if ($rawInput) {
+        $rawInput = $rawInput.Replace([string]$SepChar, [string]$SepGlyph)
+    }
+
+    Write-LiveOutputValue ($script:StatusTop + 1) $rawInput  $script:LastInFg
+    Write-LiveOutputValue ($script:StatusTop + 2) $prefixOut $script:LastPxFg
+
+    if (Test-TitleFirstOrder) {
+        Write-LiveOutputValue ($script:StatusTop + 3) $titleOut     $script:LastTitleFg
+        Write-LiveOutputValue ($script:StatusTop + 4) $connectorOut $script:LastConnectorFg
+        Write-LiveOutputValue ($script:StatusTop + 5) $artistOut    $script:LastArtistFg
+    } else {
+        Write-LiveOutputValue ($script:StatusTop + 3) $artistOut    $script:LastArtistFg
+        Write-LiveOutputValue ($script:StatusTop + 4) $connectorOut $script:LastConnectorFg
+        Write-LiveOutputValue ($script:StatusTop + 5) $titleOut     $script:LastTitleFg
+    }
+
+    Write-LiveOutputValue ($script:StatusTop + 6) $rtText     $script:LastRtFg
+    Write-LiveOutputValue ($script:StatusTop + 7) $rtPlusText $script:LastRpFg
 }
 
 function Redraw-Ui {
@@ -4891,6 +4971,7 @@ function Draw-Header {
 
 function Init-Ui {
     if ($script:UiInited) { return }
+    $script:LiveOutputLayoutValid = $false
     try { Ensure-MinConsoleLayout } catch { }
     $minNeeded = $script:StatusTop + $script:StatusLineCount + 2
     Ensure-BufferHeight $minNeeded
@@ -4917,7 +4998,7 @@ function Init-Ui {
 
 # -------------------- Console status ------------------------------------------
 
-function Get-HealthColor([int]$ageSec, [int]$graceSec, [int]$redAtSec, [int]$phase) {
+function Get-HealthColor([int]$ageSec, [int]$graceSec, [int]$redAtSec) {
     if ($ageSec -le $graceSec) { return $script:BaseFg }
     if ($redAtSec -le ($graceSec + 1)) { $redAtSec = $graceSec + 1 }
 
@@ -5075,8 +5156,7 @@ function Update-HeartbeatFields {
     }
     Set-NextHeartbeatElapsedRender $actualAgeSec
 
-    $phase    = [int]$now.Second
-    $healthFg = Get-HealthColor $actualAgeSec $HealthGraceSec $HealthRedAtSec $phase
+    $healthFg = Get-HealthColor $actualAgeSec $HealthGraceSec $HealthRedAtSec
 
     $clock        = $script:LastGoodUpdate.ToString("HH:mm:ss")
     $elapsedToken = Format-Elapsed ([TimeSpan]::FromSeconds($actualAgeSec))
@@ -5223,7 +5303,7 @@ function Update-Status(
     $script:LastRtFg        = $rtFg
     $script:LastRpFg        = $rpFg
 
-    try { Write-LiveOutputRows } catch { }
+    try { Write-LiveOutputValues } catch { }
 
     $script:LastInputUiState = $inputState
 }
@@ -6504,6 +6584,10 @@ function Publish-Outputs(
     [string]$rtPlusText,
     [bool]$UpdateHeartbeatOnSuccess = $false
 ) {
+    # The FILES block is static during normal publication. Keep the previous failure map
+    # so it is redrawn only when one or more WRITE FAILED indicators actually change.
+    $previousWriteFailures = $script:LastWriteFailures
+
     $result = Write-OutputsAtomic $prefixText $artistText $connectorText $titleText $rtText $rtPlusText
 
     if ($null -ne $result -and $result.Success) {
@@ -6546,7 +6630,24 @@ function Publish-Outputs(
         $script:NextOutputRetryUtc = [DateTime]::UtcNow.AddSeconds($script:OutputRetryIntervalSec)
     }
 
-    if ($script:UiInited -and -not $script:UiOverlayActive) {
+    $failureDisplayChanged = $false
+    try {
+        if ($previousWriteFailures.Count -ne $script:LastWriteFailures.Count) {
+            $failureDisplayChanged = $true
+        } else {
+            foreach ($label in @($previousWriteFailures.Keys)) {
+                if (-not $script:LastWriteFailures.ContainsKey($label)) {
+                    $failureDisplayChanged = $true
+                    break
+                }
+            }
+        }
+    } catch {
+        # If comparison is unexpectedly unavailable, prefer one safe refresh.
+        $failureDisplayChanged = $true
+    }
+
+    if ($failureDisplayChanged -and $script:UiInited -and -not $script:UiOverlayActive) {
         try { Write-HeaderFileRows } catch { }
     }
 
@@ -6568,8 +6669,8 @@ function Retry-PendingOutputsIfDue {
         ([bool]$pending.UpdateHeartbeatOnSuccess)
     )
 
-    # Publish-Outputs refreshes only the FILES rows, so recovered warnings disappear
-    # immediately while the CONTENT block remains completely unchanged.
+    # Publish-Outputs refreshes the FILES rows only when WRITE FAILED indicators change,
+    # so recovered warnings disappear while unchanged static rows are left untouched.
 
     return $true
 }
@@ -7933,7 +8034,7 @@ function Initialize-Watcher {
     $script:WatchedDir  = Split-Path -Parent $InFile
     $script:WatchedName = Split-Path -Leaf  $InFile
 
-    if (-not (Ensure-Directory $script:WatchedDir "Watcher directory")) { throw "Cannot create/access watcher directory: $script:WatchedDir" }
+    if (-not (Ensure-Directory $script:WatchedDir)) { throw "Cannot create/access watcher directory: $script:WatchedDir" }
 
     $script:fsw                       = New-Object System.IO.FileSystemWatcher
     $script:fsw.Path                  = $script:WatchedDir
@@ -8299,7 +8400,7 @@ try {
 
         if ($null -eq $evt) {
             $sleepMs = Get-HeartbeatSleepMilliseconds $PollIntervalMs
-            Start-Sleep -Milliseconds $sleepMs
+            [System.Threading.Thread]::Sleep($sleepMs)
             if ($script:Stopping) { break }
 
             # Recheck after the cooperative sleep so a watcher event that arrived meanwhile is handled
