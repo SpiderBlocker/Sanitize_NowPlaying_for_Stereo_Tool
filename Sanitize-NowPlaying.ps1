@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.4"
+$ScriptVersion = "2.0.5"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -1734,6 +1734,14 @@ try { [Console]::CursorVisible = $false } catch { }
 
 $script:BaseFg = $UI_Color_InputText
 $script:BaseBg = $UI_Color_Background
+
+# Optional redraw clip, used only while restoring a closed overlay. Normal rendering remains unchanged.
+$script:UiClipActive = $false
+$script:UiClipLeft   = 0
+$script:UiClipTop    = 0
+$script:UiClipWidth  = 0
+$script:UiClipHeight = 0
+
 try {
     [Console]::ForegroundColor = $script:BaseFg
     [Console]::BackgroundColor = $script:BaseBg
@@ -1964,7 +1972,7 @@ function Show-CustomTextEditor([string]$title, [string]$label, [string]$initialV
         Pop-UiDialogGeometry $dialogToken
         # Restore the covered rows explicitly. The connector editor previously relied only on its
         # caller's partial redraw, which could leave frame remnants after Esc.
-        try { Restore-UiAfterMenu $y0 $boxH } catch { }
+        try { Restore-UiAfterMenu $x0 $y0 $boxW $boxH } catch { }
     }
 }
 
@@ -2107,7 +2115,7 @@ function Show-LanguageMenu {
             }
             $k = Read-OverlayKey
 
-            if ($k.Key -eq [ConsoleKey]::Escape) { Restore-UiAfterMenu $y0 $menuH; return $false }
+            if ($k.Key -eq [ConsoleKey]::Escape) { Restore-UiAfterMenu $x0 $y0 $menuW $menuH; return $false }
 
             if ($k.Key -eq [ConsoleKey]::UpArrow) {
                 if ($selected -gt 0) { $selected-- }
@@ -2134,7 +2142,7 @@ function Show-LanguageMenu {
                 $script:PrefixLanguageCode = $newCode
                 Save-PrefixLanguageSetting
                 Apply-PrefixFromLanguage
-                Restore-UiAfterMenu $y0 $menuH
+                Restore-UiAfterMenu $x0 $y0 $menuW $menuH
                 return $true
             }
 
@@ -2252,7 +2260,7 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $y0 $menuH } catch { }
+        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2344,7 +2352,7 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $y0 $menuH } catch { }
+        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2743,7 +2751,7 @@ function Show-DelimiterMenu {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $y0 $menuH } catch { }
+        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2965,7 +2973,6 @@ function Show-SettingsMenu {
                 Apply-WorkDirIfConfigured
 
                 try { Refresh-UiAfterSettingChange } catch { }
-                try { Draw-Header } catch { }
 
                 return $false
             }
@@ -3040,7 +3047,7 @@ function Show-SettingsMenu {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $y0 $menuH } catch { }
+        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -4036,57 +4043,82 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
         # A cancelled required startup wizard has no valid underlay to restore. In all other cases,
         # clear the picker footprint and redraw the UI exactly as before.
         if (-not ($MarkWizardDone -and $cancelled)) {
-            try { Restore-UiAfterMenu $y0 $menuH } catch { }
+            try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
         }
     }
 }
 
-function Restore-UiAfterMenu([int]$menuTop, [int]$menuHeight) {
-    # Clear only the area that was covered by the overlay menu, then redraw the underlying UI sections
-    # that can be affected. This avoids a full Clear-Host redraw when leaving the menu via ESC.
-    # While an overlay menu is active, Ensure-UiFresh() early-returns. Submenus can still clear parts
-    # of the underlying UI (e.g. the heartbeat/legend rows), so temporarily drop the overlay flag
-    # while restoring the underlay.
+function Restore-UiAfterMenu([int]$menuLeft, [int]$menuTop, [int]$menuWidth, [int]$menuHeight) {
+    # Rebuild the current underlay, but clip every write to the exact former dialog rectangle.
+    # While an overlay is active, Ensure-UiFresh() early-returns; temporarily release that guard.
     $prevOverlay            = $script:UiOverlayActive
     $script:UiOverlayActive = $false
-    try { Ensure-UiFresh } catch { }
 
     try {
-        $yStart = [Math]::Max(0, $menuTop)
-        $yEnd   = [Math]::Max($yStart, $menuTop + $menuHeight - 1)
+        try { Ensure-UiFresh } catch { }
 
-        for ($y = $yStart; $y -le $yEnd; $y++) {
-            Write-At 0 $y "" $script:BaseFg $true
+        $uiWidth  = Get-UiWidth $UI_MinRenderWidth
+        $uiHeight = Get-UiAvailableHeight 1
+        $xStart   = [Math]::Max(0, $menuLeft)
+        $yStart   = [Math]::Max(0, $menuTop)
+        $xEnd     = [Math]::Min([Math]::Max(0, $uiWidth - 1), $menuLeft + [Math]::Max(0, $menuWidth))
+        $yEnd     = [Math]::Min($uiHeight, $menuTop + [Math]::Max(0, $menuHeight))
+
+        if ($xEnd -le $xStart -or $yEnd -le $yStart) { return }
+
+        $clipWidth  = $xEnd - $xStart
+        $clipHeight = $yEnd - $yStart
+
+        # Remove the dialog itself first; subsequent render calls refill only this rectangle.
+        for ($y = $yStart; $y -lt $yEnd; $y++) {
+            Write-At $xStart $y (' ' * $clipWidth) $script:BaseFg $false
         }
 
-        # If the menu overlaps the header, redraw it completely. Otherwise refresh the
-        # FILES rows so write-failure markers changed during the overlay are not left stale.
-        if ($yStart -lt $script:StatusTop) {
-            try { Draw-Header } catch { }
-        } else {
-            try { Write-HeaderFileRows } catch { }
+        $prevClipActive = $script:UiClipActive
+        $prevClipLeft   = $script:UiClipLeft
+        $prevClipTop    = $script:UiClipTop
+        $prevClipWidth  = $script:UiClipWidth
+        $prevClipHeight = $script:UiClipHeight
+
+        $script:UiClipActive = $true
+        $script:UiClipLeft   = $xStart
+        $script:UiClipTop    = $yStart
+        $script:UiClipWidth  = $clipWidth
+        $script:UiClipHeight = $clipHeight
+
+        try {
+            # Reuse the normal renderers so current values, colors and warnings are restored.
+            if ($yStart -lt $script:StatusTop) {
+                try { Draw-Header } catch { }
+            } else {
+                try { Write-HeaderFileRows } catch { }
+            }
+
+            try { Draw-StatusFrame } catch { }
+            try { Write-LiveOutputRows } catch { }
+
+            $lastCoveredRow  = $yEnd - 1
+            $heartbeatRow    = $script:StatusTop + 9
+            $settingsTop     = $script:StatusTop + 10
+            $settingsBottom  = $script:StatusTop + 12
+            $heartbeatCovered = ($heartbeatRow -ge $yStart -and $heartbeatRow -le $lastCoveredRow)
+            $settingsCovered  = ($lastCoveredRow -ge $settingsTop -and $yStart -le $settingsBottom)
+
+            if ($heartbeatCovered) {
+                $script:HeartbeatLayoutValid = $false
+                try { Ensure-HeartbeatLayout } catch { }
+            } elseif ($settingsCovered) {
+                try { Render-SettingsAndLegend } catch { }
+            }
+
+            try { Update-HeartbeatBar } catch { }
+        } finally {
+            $script:UiClipActive = $prevClipActive
+            $script:UiClipLeft   = $prevClipLeft
+            $script:UiClipTop    = $prevClipTop
+            $script:UiClipWidth  = $prevClipWidth
+            $script:UiClipHeight = $prevClipHeight
         }
-
-        try { Draw-StatusFrame } catch { }
-        try { Write-LiveOutputRows } catch { }
-
-        $heartbeatRow    = $script:StatusTop + 9
-        $settingsTop     = $script:StatusTop + 10
-        $settingsBottom  = $script:StatusTop + 12
-        $heartbeatCovered = ($heartbeatRow -ge $yStart -and $heartbeatRow -le $yEnd)
-        $settingsCovered  = ($yEnd -ge $settingsTop -and $yStart -le $settingsBottom)
-
-        if ($heartbeatCovered) {
-            # The row was hidden and must be reconstructed. Its value is calculated directly from
-            # LastGoodUpdate, not from an independently accumulated display state.
-            $script:HeartbeatLayoutValid = $false
-            try { Ensure-HeartbeatLayout } catch { }
-        } elseif ($settingsCovered) {
-            # Restore only the footer rows; keep the already-visible heartbeat and its render cache intact.
-            try { Render-SettingsAndLegend } catch { }
-        }
-
-        try { Update-HeartbeatBar } catch { }
     } finally {
         $script:UiOverlayActive = $prevOverlay
     }
@@ -4336,6 +4368,24 @@ function Write-At([int]$x, [int]$y, [string]$text, [ConsoleColor]$fg, [bool]$Pad
 
     if ($PadLine -and $x -eq 0 -and $max -gt 0) { $t = $t.PadRight($max) }
 
+    # During overlay restoration, retain the normal renderer but write only the
+    # intersection with the former dialog rectangle.
+    if ($script:UiClipActive) {
+        $clipLeft   = [int]$script:UiClipLeft
+        $clipTop    = [int]$script:UiClipTop
+        $clipRight  = $clipLeft + [Math]::Max(0, [int]$script:UiClipWidth)
+        $clipBottom = $clipTop  + [Math]::Max(0, [int]$script:UiClipHeight)
+
+        if ($y -lt $clipTop -or $y -ge $clipBottom -or $t.Length -le 0) { return }
+
+        $writeLeft  = [Math]::Max($x, $clipLeft)
+        $writeRight = [Math]::Min($x + $t.Length, $clipRight)
+        if ($writeRight -le $writeLeft) { return }
+
+        $t = $t.Substring($writeLeft - $x, $writeRight - $writeLeft)
+        $x = $writeLeft
+    }
+
     try {
         With-ConsoleColor $fg $script:BaseBg {
             Set-UiCursorPosition $x $y
@@ -4427,6 +4477,31 @@ function Write-AtSegments([int]$x, [int]$y, [object[]]$segments, [ConsoleColor]$
 
     $plain = Pad-OrEllipsize $plain $max
     if ($PadLine -and $x -eq 0 -and $max -gt 0) { $plain = $plain.PadRight($max) }
+
+    # Preserve the established fast path for normal rendering. During a clipped restore, route
+    # each colored segment through Write-At so the same rectangle is applied consistently.
+    if ($script:UiClipActive) {
+        $pos = 0
+        foreach ($s in $segments) {
+            if ($pos -ge $plain.Length) { break }
+            $segText = Get-SegText $s
+            if ([string]::IsNullOrEmpty($segText)) { continue }
+
+            $remaining = $plain.Length - $pos
+            if ($segText.Length -gt $remaining) { $segText = $segText.Substring(0, $remaining) }
+
+            try { Write-At ($x + $pos) $y $segText (Get-SegFg $s $defaultFg) $false } catch { }
+            $pos += $segText.Length
+        }
+
+        $remainingFill = $plain.Length - $pos
+        if ($remainingFill -gt 0) {
+            try { Write-At ($x + $pos) $y (' ' * $remainingFill) $defaultFg $false } catch { }
+        }
+
+        try { [Console]::CursorVisible = $false } catch { }
+        return
+    }
 
     try {
         Set-UiCursorPosition $x $y
