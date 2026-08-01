@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.5"
+$ScriptVersion = "2.0.6"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -1000,6 +1000,162 @@ function Pop-UiDialogGeometry([string]$token) {
     }
 }
 
+function Initialize-UiRegionSnapshotNative {
+    # RawUI.GetBufferContents() can expose Unicode box-drawing cells as NUL on some
+    # PowerShell/conhost combinations. Use the Unicode Win32 console-buffer API instead.
+    try {
+        if (-not ("Win.ConsoleRegionNative" -as [type])) {
+            Add-Type -TypeDefinition @"
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleRegionNative {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct COORD {
+            public short X;
+            public short Y;
+            public COORD(short x, short y) { X = x; Y = y; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SMALL_RECT {
+            public short Left;
+            public short Top;
+            public short Right;
+            public short Bottom;
+        }
+
+        [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
+        public struct CHAR_INFO {
+            [FieldOffset(0)] public char UnicodeChar;
+            [FieldOffset(0)] public byte AsciiChar;
+            [FieldOffset(2)] public ushort Attributes;
+        }
+
+        public sealed class Snapshot {
+            public short X;
+            public short Y;
+            public short Width;
+            public short Height;
+            public CHAR_INFO[] Cells;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", EntryPoint = "ReadConsoleOutputW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ReadConsoleOutputW(
+            IntPtr hConsoleOutput,
+            [Out] CHAR_INFO[] lpBuffer,
+            COORD dwBufferSize,
+            COORD dwBufferCoord,
+            ref SMALL_RECT lpReadRegion);
+
+        [DllImport("kernel32.dll", EntryPoint = "WriteConsoleOutputW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WriteConsoleOutputW(
+            IntPtr hConsoleOutput,
+            [In] CHAR_INFO[] lpBuffer,
+            COORD dwBufferSize,
+            COORD dwBufferCoord,
+            ref SMALL_RECT lpWriteRegion);
+
+        private const int STD_OUTPUT_HANDLE = -11;
+
+        public static Snapshot Capture(int left, int top, int width, int height) {
+            if (left < 0 || top < 0 || width <= 0 || height <= 0 ||
+                left > short.MaxValue || top > short.MaxValue ||
+                width > short.MaxValue || height > short.MaxValue) return null;
+
+            IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return null;
+
+            CHAR_INFO[] cells = new CHAR_INFO[checked(width * height)];
+            SMALL_RECT rect = new SMALL_RECT {
+                Left = (short)left,
+                Top = (short)top,
+                Right = (short)(left + width - 1),
+                Bottom = (short)(top + height - 1)
+            };
+
+            if (!ReadConsoleOutputW(handle, cells,
+                    new COORD((short)width, (short)height),
+                    new COORD(0, 0), ref rect)) return null;
+
+            return new Snapshot {
+                X = (short)left,
+                Y = (short)top,
+                Width = (short)width,
+                Height = (short)height,
+                Cells = cells
+            };
+        }
+
+        public static bool Restore(Snapshot snapshot) {
+            if (snapshot == null || snapshot.Cells == null ||
+                snapshot.Width <= 0 || snapshot.Height <= 0) return false;
+
+            IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return false;
+
+            SMALL_RECT rect = new SMALL_RECT {
+                Left = snapshot.X,
+                Top = snapshot.Y,
+                Right = (short)(snapshot.X + snapshot.Width - 1),
+                Bottom = (short)(snapshot.Y + snapshot.Height - 1)
+            };
+
+            return WriteConsoleOutputW(handle, snapshot.Cells,
+                new COORD(snapshot.Width, snapshot.Height),
+                new COORD(0, 0), ref rect);
+        }
+    }
+}
+"@
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Get-UiRegionSnapshot([int]$left, [int]$top, [int]$width, [int]$height) {
+    # Preserve the exact cells below a nested overlay, including Unicode frame glyphs and colors.
+    try {
+        if ($width -le 0 -or $height -le 0) { return $null }
+
+        $raw  = $host.UI.RawUI
+        $size = $raw.BufferSize
+        $x0   = [Math]::Max(0, $left + $script:UiOffsetX)
+        $y0   = [Math]::Max(0, $top  + $script:UiOffsetY)
+        $x1   = [Math]::Min($size.Width  - 1, $x0 + $width  - 1)
+        $y1   = [Math]::Min($size.Height - 1, $y0 + $height - 1)
+        if ($x1 -lt $x0 -or $y1 -lt $y0) { return $null }
+
+        if (-not (Initialize-UiRegionSnapshotNative)) { return $null }
+        return [Win.ConsoleRegionNative]::Capture($x0, $y0, ($x1 - $x0 + 1), ($y1 - $y0 + 1))
+    } catch { return $null }
+}
+
+function Restore-UiRegionSnapshot($snapshot) {
+    if ($null -eq $snapshot) { return $false }
+    try {
+        if (-not (Initialize-UiRegionSnapshotNative)) { return $false }
+        $restored = [Win.ConsoleRegionNative]::Restore($snapshot)
+        try { [Console]::CursorVisible = $false } catch { }
+        return [bool]$restored
+    } catch { return $false }
+}
+
+function Restore-UiAfterDialog($underlaySnapshot, [int]$left, [int]$top, [int]$width, [int]$height) {
+    $restored = $false
+    if ($null -ne $underlaySnapshot) {
+        try { $restored = Restore-UiRegionSnapshot $underlaySnapshot } catch { }
+    }
+    $script:UiLastDialogRestoredExact = $restored
+    if (-not $restored) { Restore-UiAfterMenu $left $top $width $height }
+}
+
 function Get-UiAvailableHeight([int]$minimumHeight = 10) {
     # Return the height of the drawable UI area below the configured top margin.
     $height = $minimumHeight
@@ -1770,7 +1926,8 @@ function Show-CustomTextEditor([string]$title, [string]$label, [string]$initialV
     # Single-field editor shared by the custom prefix and the independent connector setting.
     # Enter accepts only when both the stored input and the final emitted output, including
     # automatic spacing, fit within 64 characters.
-    $dialogToken = $null
+    $dialogToken      = $null
+    $underlaySnapshot = $null
     $winW = [Math]::Max(44, ([Console]::WindowWidth - $script:UiOffsetX - $script:UiRightMargin))
     $winH = Get-UiAvailableHeight 10
 
@@ -1779,6 +1936,9 @@ function Show-CustomTextEditor([string]$title, [string]$label, [string]$initialV
     $boxW = Get-UiDialogWidth $winW 68 54 $title $sizingHelp -dialogHeight $boxH
     $x0   = Get-UiCenteredStart $winW $boxW
     $y0   = Get-UiCenteredStart $winH $boxH
+    if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+        $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $boxW $boxH
+    }
     $dialogToken = Push-UiDialogGeometry $boxW $boxH $x0 $y0
 
     $value         = Normalize-CustomTextSetting $initialValue
@@ -1970,9 +2130,7 @@ function Show-CustomTextEditor([string]$title, [string]$label, [string]$initialV
     } finally {
         try { [Console]::CursorVisible = $false } catch { }
         Pop-UiDialogGeometry $dialogToken
-        # Restore the covered rows explicitly. The connector editor previously relied only on its
-        # caller's partial redraw, which could leave frame remnants after Esc.
-        try { Restore-UiAfterMenu $x0 $y0 $boxW $boxH } catch { }
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $boxW $boxH } catch { }
     }
 }
 
@@ -1980,6 +2138,7 @@ function Show-LanguageMenu {
     $prevOverlay            = $script:UiOverlayActive
     $script:UiOverlayActive = $true
     $dialogToken            = $null
+    $underlaySnapshot       = $null
     Lock-ConsoleScrolling
     try {
         # Modal language selection UI (opened from the Settings menu).
@@ -1996,6 +2155,9 @@ function Show-LanguageMenu {
         $menuW = Get-UiDialogWidth $winW 78 52 $title $help -dialogHeight $menuH
         $x0    = Get-UiCenteredStart $winW $menuW
         $y0    = Get-UiCenteredStart $winH $menuH
+        if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+            $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $menuW $menuH
+        }
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $selected = Get-PrefixLanguageIndex $script:PrefixLanguageCode
@@ -2115,7 +2277,7 @@ function Show-LanguageMenu {
             }
             $k = Read-OverlayKey
 
-            if ($k.Key -eq [ConsoleKey]::Escape) { Restore-UiAfterMenu $x0 $y0 $menuW $menuH; return $false }
+            if ($k.Key -eq [ConsoleKey]::Escape) { return $false }
 
             if ($k.Key -eq [ConsoleKey]::UpArrow) {
                 if ($selected -gt 0) { $selected-- }
@@ -2134,7 +2296,10 @@ function Show-LanguageMenu {
                     try { $initial = [string]$script:Settings.CustomPrefixText } catch { }
 
                     $custom = Show-CustomTextEditor 'Custom prefix text' 'Prefix text:' $initial -labelWidth 14 -outputPadding 1
-                    if ($null -eq $custom) { _DrawMenu; continue }
+                    if ($null -eq $custom) {
+                        if (-not $script:UiLastDialogRestoredExact) { _DrawMenu }
+                        continue
+                    }
 
                     $script:Settings.CustomPrefixText = Normalize-CustomTextSetting ([string]$custom)
                 }
@@ -2142,7 +2307,6 @@ function Show-LanguageMenu {
                 $script:PrefixLanguageCode = $newCode
                 Save-PrefixLanguageSetting
                 Apply-PrefixFromLanguage
-                Restore-UiAfterMenu $x0 $y0 $menuW $menuH
                 return $true
             }
 
@@ -2157,6 +2321,7 @@ function Show-LanguageMenu {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2164,6 +2329,7 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
     $prevOverlay            = $script:UiOverlayActive
     $script:UiOverlayActive = $true
     $dialogToken            = $null
+    $underlaySnapshot       = $null
     try {
         try { [Console]::CursorVisible = $false } catch { }
 
@@ -2179,6 +2345,9 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
         $menuW = Get-UiDialogWidth $winW 34 34 $title $help -dialogHeight $menuH
         $x0    = Get-UiCenteredStart $winW $menuW
         $y0    = Get-UiCenteredStart $winH $menuH
+        if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+            $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $menuW $menuH
+        }
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $selected = $(if ($currentValue) { 0 } else { 1 })
@@ -2260,7 +2429,7 @@ function Show-OnOffMenu([string]$title, [bool]$currentValue) {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2272,6 +2441,7 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
     $x0 = 0
     $y0 = 0
     $dialogToken = $null
+    $underlaySnapshot       = $null
     try {
         try { [Console]::CursorVisible = $false } catch { }
 
@@ -2288,6 +2458,9 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
         $menuW = Get-UiDialogWidth $winW 42 42 $title $help -dialogHeight $menuH
         $x0    = Get-UiCenteredStart $winW $menuW
         $y0    = Get-UiCenteredStart $winH $menuH
+        if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+            $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $menuW $menuH
+        }
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $normalizedCurrent = Normalize-ArtistTitleOrder $currentOrder
@@ -2352,7 +2525,7 @@ function Show-ArtistTitleOrderMenu([string]$currentOrder) {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2360,6 +2533,7 @@ function Show-DelimiterMenu {
     $prevOverlay            = $script:UiOverlayActive
     $script:UiOverlayActive = $true
     $dialogToken            = $null
+    $underlaySnapshot       = $null
     try {
         try { [Console]::CursorVisible = $false } catch { }
 
@@ -2384,6 +2558,9 @@ function Show-DelimiterMenu {
         $menuW = Get-UiDialogWidth $winW 60 44 $title $help -dialogHeight $menuH
         $x0    = Get-UiCenteredStart $winW $menuW
         $y0    = Get-UiCenteredStart $winH $menuH
+        if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+            $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $menuW $menuH
+        }
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $selected = 0
@@ -2419,6 +2596,8 @@ function Show-DelimiterMenu {
             if ($by -lt ($y0 + 2)) { $by = $y0 + 2 }
             if ($by -gt ($y0 + $menuH - 2 - $boxH + 1)) { $by = ($y0 + $menuH - 2 - $boxH + 1) }
 
+            $toastSnapshot = Get-UiRegionSnapshot $bx $by $boxW $boxH
+
             # Border
             Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
             Write-At $bx ($by + 2) ($UI_Frame_BottomLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_BottomRight) ($UI_Color_MenuFrame)
@@ -2436,8 +2615,9 @@ function Show-DelimiterMenu {
 
             Start-Sleep -Milliseconds $UI_ToastDurationMs
 
-            # Redraw the Delimiter menu to restore any covered content cleanly (same behavior as the WorkDir menu).
-            try { _DrawMenu } catch { }
+            $restored = $false
+            try { $restored = Restore-UiRegionSnapshot $toastSnapshot } catch { }
+            if (-not $restored) { try { _DrawMenu } catch { } }
         }
 
         function _PromptCustomDelimiter([string]$initialValue) {
@@ -2447,6 +2627,7 @@ function Show-DelimiterMenu {
             $boxH = 7
             $bx   = $x0 + [int](($menuW - $boxW) / 2)
             $by   = $y0 + [int](($menuH - $boxH) / 2)
+            $inputSnapshot = Get-UiRegionSnapshot $bx $by $boxW $boxH
 
             $prompt = "Playout delimiter: "
             $buf    = ""
@@ -2633,6 +2814,9 @@ function Show-DelimiterMenu {
                 }
             } finally {
                 try { [Console]::CursorVisible = $false } catch { }
+                $restored = $false
+                try { $restored = Restore-UiRegionSnapshot $inputSnapshot } catch { }
+                if (-not $restored) { try { _DrawMenu } catch { } }
             }
         }
         function _DrawMenu([switch]$ContentOnly) {
@@ -2716,7 +2900,7 @@ function Show-DelimiterMenu {
 
                 if ($newKey -eq 'CUSTOM') {
                     $val = _PromptCustomDelimiter $curCustom
-                    if ($null -eq $val) { _DrawMenu; continue }
+                    if ($null -eq $val) { continue }
 
                     # Apply to settings immediately (so Apply-DelimiterFromSettings can pick it up).
                     if (-not $script:Settings) { $script:Settings = @{} }
@@ -2751,7 +2935,7 @@ function Show-DelimiterMenu {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -2759,6 +2943,7 @@ function Show-SettingsMenu {
     $prevOverlay            = $script:UiOverlayActive
     $script:UiOverlayActive = $true
     $dialogToken            = $null
+    $underlaySnapshot       = $null
     $anyChanged             = $false
     # Snapshot current settings so Esc can discard changes reliably.
     # We copy key/value pairs to keep the object type consistent (hashtable-like).
@@ -2788,6 +2973,9 @@ function Show-SettingsMenu {
         $menuW = Get-UiDialogWidth $winW 56 50 $title $help -dialogHeight $menuH
         $x0    = Get-UiCenteredStart $winW $menuW
         $y0    = Get-UiCenteredStart $winH $menuH
+        if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+            $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $menuW $menuH
+        }
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $selected = 0
@@ -3041,13 +3229,13 @@ function Show-SettingsMenu {
                 }
 
                 if ($changed) { $anyChanged = $true }
-                _DrawMenu
+                if ($changed -or -not $script:UiLastDialogRestoredExact) { _DrawMenu }
             }
         }
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
     }
 }
 
@@ -3056,6 +3244,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
     $prevOverlay            = $script:UiOverlayActive
     $script:UiOverlayActive = $true
     $dialogToken            = $null
+    $underlaySnapshot       = $null
     $cancelled              = $false
     try {
         # Interactive working-directory picker (arrow keys + Enter).
@@ -3070,6 +3259,9 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
 
         $x0 = Get-UiCenteredStart $winW $menuW
         $y0 = Get-UiCenteredStart $winH $menuH
+        if ($null -ne (Get-UiDialogUnderlayGeometry)) {
+            $underlaySnapshot = Get-UiRegionSnapshot $x0 $y0 $menuW $menuH
+        }
         $dialogToken = Push-UiDialogGeometry $menuW $menuH $x0 $y0
 
         $listLines  = $null  # computed after infoLines is known
@@ -3377,6 +3569,8 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             $by   = $y0 + [int](($menuH - $boxH) / 2)
             if ($by -lt ($y0 + 4)) { $by = $y0 + 4 }
 
+            $toastSnapshot = Get-UiRegionSnapshot $bx $by $boxW $boxH
+
             # Border
             Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
             Write-At $bx ($by + 2) ($UI_Frame_BottomLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_BottomRight) ($UI_Color_MenuFrame)
@@ -3401,10 +3595,9 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
 
             Start-Sleep -Milliseconds $UI_ToastDurationMs
 
-            # Let the outer WorkDir loop redraw the menu. Calling _DrawList from inside this nested
-            # function changes the meaning of its -Scope 1 state lookups and can produce errors such as
-            # "Cannot find a variable with the name 'listTop'" after showing a validation toast.
-            $script:OverlayNeedsRedraw = $true
+            $restored = $false
+            try { $restored = Restore-UiRegionSnapshot $toastSnapshot } catch { }
+            if (-not $restored) { $script:OverlayNeedsRedraw = $true }
         }
 
         function _DrawListRow([System.Collections.Generic.List[string]]$items, [int]$top, [int]$row) {
@@ -3499,6 +3692,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             $boxH = 5
             $bx   = $x0 + [int](($menuW - $boxW) / 2)
             $by   = $y0 + [int](($menuH - $boxH) / 2)
+            $inputSnapshot = Get-UiRegionSnapshot $bx $by $boxW $boxH
 
             $prompt    = "Name: "
             $buf       = ""
@@ -3629,6 +3823,9 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 }
             } finally {
                 try { [Console]::CursorVisible = $false } catch { }
+                $restored = $false
+                try { $restored = Restore-UiRegionSnapshot $inputSnapshot } catch { }
+                if (-not $restored) { $script:OverlayNeedsRedraw = $true }
             }
         }
         function _PromptSelectVolume {
@@ -3677,6 +3874,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
 
             $sel = 0
             $top = 0
+            $volumeSnapshot = Get-UiRegionSnapshot $bx $by $boxW (5 + $listCount)
 
             function _DrawVolBox([switch]$ContentOnly) {
                 $innerW    = $boxW - 4
@@ -3736,9 +3934,10 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                 Write-At $bx ($by + 4 + $listCount) ($UI_Frame_BottomLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_BottomRight) ($UI_Color_MenuFrame)
             }
 
-            _DrawVolBox
+            try {
+                _DrawVolBox
 
-            while ($true) {
+                while ($true) {
                 if (-not [Console]::KeyAvailable) {
                     [System.Threading.Thread]::Sleep($UI_ShortSleepMs)
                     Invoke-MenuIdleTick
@@ -3779,6 +3978,11 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     try { $root = (Resolve-Path -LiteralPath $root -ErrorAction Stop).Path } catch { }
                     return $root
                 }
+                }
+            } finally {
+                $restored = $false
+                try { $restored = Restore-UiRegionSnapshot $volumeSnapshot } catch { }
+                if (-not $restored) { $script:OverlayNeedsRedraw = $true }
             }
         }
         function _GetCursorFolderDisplay($items, [int]$idx) {
@@ -3882,17 +4086,14 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
                     $frameNeedsRedraw = $true
                 }
 
-                # Always redraw after closing the modal overlay (also on cancel),
-                # otherwise the overlay remains visually on screen until the next repaint.
-                $frameNeedsRedraw = $true
-                $needsRedraw = $true
+                if (-not [string]::IsNullOrWhiteSpace($root)) { $needsRedraw = $true }
                 continue
             }
 
             if ($k.Key -eq [ConsoleKey]::N) {
 
                 $name = _PromptNewFolderName
-                if ($null -eq $name) { $lastMsg = ""; $toastPending = $false; $frameNeedsRedraw = $true; $needsRedraw = $true; continue }
+                if ($null -eq $name) { $lastMsg = ""; $toastPending = $false; continue }
 
                 # Validate folder name (Windows rules)
                 $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
@@ -4043,7 +4244,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
         # A cancelled required startup wizard has no valid underlay to restore. In all other cases,
         # clear the picker footprint and redraw the UI exactly as before.
         if (-not ($MarkWizardDone -and $cancelled)) {
-            try { Restore-UiAfterMenu $x0 $y0 $menuW $menuH } catch { }
+            try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
         }
     }
 }
