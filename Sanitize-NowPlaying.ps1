@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.6"
+$ScriptVersion = "2.0.7"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -1945,18 +1945,20 @@ function Show-CustomTextEditor([string]$title, [string]$label, [string]$initialV
     $position      = $value.Length
     $selectAll     = ($value.Length -gt 0)
     $outputPadding = [Math]::Max(0, $outputPadding)
-    function _DrawCustomTextBox {
-        $headerHelp = "Enter: apply$UI_HelpSegmentSeparator$UI_HelpCancel"
+    function _DrawCustomTextBox([switch]$ContentOnly) {
+        if (-not $ContentOnly) {
+            $headerHelp = "Enter: apply$UI_HelpSegmentSeparator$UI_HelpCancel"
 
-        Write-At $x0 $y0 ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
+            Write-At $x0 $y0 ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
 
-        $headerW = $boxW - 4
+            $headerW = $boxW - 4
 
-        With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
-            Set-UiCursorPosition $x0 ($y0 + 1); [Console]::Write($UI_Frame_Vertical + " ")
-            Set-UiCursorPosition ($x0 + $boxW - 2) ($y0 + 1); [Console]::Write(" " + $UI_Frame_Vertical)
+            With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
+                Set-UiCursorPosition $x0 ($y0 + 1); [Console]::Write($UI_Frame_Vertical + " ")
+                Set-UiCursorPosition ($x0 + $boxW - 2) ($y0 + 1); [Console]::Write(" " + $UI_Frame_Vertical)
+            }
+            Write-UiHeaderContent ($x0 + 2) ($y0 + 1) $headerW $title $headerHelp
         }
-        Write-UiHeaderContent ($x0 + 2) ($y0 + 1) $headerW $title $headerHelp
 
         Write-At $x0 ($y0 + 2) ($UI_Frame_MiddleLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_MiddleRight) ($UI_Color_MenuFrame)
 
@@ -2057,8 +2059,10 @@ function Show-CustomTextEditor([string]$title, [string]$label, [string]$initialV
     }
 
     try {
+        $contentOnly = $false
         while ($true) {
-            _DrawCustomTextBox
+            _DrawCustomTextBox -ContentOnly:$contentOnly
+            $contentOnly = $true
             $k = Read-TextEditorKey
 
             if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
@@ -2653,18 +2657,20 @@ function Show-DelimiterMenu {
                 return (_GetDelimiterDisplay ($value.Substring(0, $count))).Length
             }
 
-            function _DrawInputBox {
-                Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
+            function _DrawInputBox([switch]$ContentOnly) {
+                if (-not $ContentOnly) {
+                    Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
 
-                $innerWHeader = $boxW - 4
-                $headerTitle  = "Custom playout delimiter"
-                $headerHelp   = "Enter: apply$UI_HelpSegmentSeparator$UI_HelpCancel"
+                    $innerWHeader = $boxW - 4
+                    $headerTitle  = "Custom playout delimiter"
+                    $headerHelp   = "Enter: apply$UI_HelpSegmentSeparator$UI_HelpCancel"
 
-                With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
-                    Set-UiCursorPosition $bx ($by + 1); [Console]::Write($UI_Frame_Vertical + " ")
-                    Set-UiCursorPosition ($bx + $boxW - 2) ($by + 1); [Console]::Write(" " + $UI_Frame_Vertical)
+                    With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
+                        Set-UiCursorPosition $bx ($by + 1); [Console]::Write($UI_Frame_Vertical + " ")
+                        Set-UiCursorPosition ($bx + $boxW - 2) ($by + 1); [Console]::Write(" " + $UI_Frame_Vertical)
+                    }
+                    Write-UiHeaderContent ($bx + 2) ($by + 1) $innerWHeader $headerTitle $headerHelp
                 }
-                Write-UiHeaderContent ($bx + 2) ($by + 1) $innerWHeader $headerTitle $headerHelp
 
                 Write-At $bx ($by + 2) ($UI_Frame_MiddleLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_MiddleRight) ($UI_Color_MenuFrame)
 
@@ -2740,8 +2746,10 @@ function Show-DelimiterMenu {
             }
 
             try {
+                $contentOnly = $false
                 while ($true) {
-                    _DrawInputBox
+                    _DrawInputBox -ContentOnly:$contentOnly
+                    $contentOnly = $true
 
                     $k = Read-TextEditorKey
                     if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
@@ -3699,18 +3707,20 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             $position  = 0
             $selectAll = $false
 
-            function _DrawInputBox {
-                Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
+            function _DrawInputBox([switch]$ContentOnly) {
+                if (-not $ContentOnly) {
+                    Write-At $bx $by       ($UI_Frame_TopLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_TopRight) ($UI_Color_MenuFrame)
 
-                $innerWHeader = $boxW - 4
-                $headerTitle  = "Create new folder"
-                $headerHelp   = "Enter: create$UI_HelpSegmentSeparator$UI_HelpCancel"
+                    $innerWHeader = $boxW - 4
+                    $headerTitle  = "Create new folder"
+                    $headerHelp   = "Enter: create$UI_HelpSegmentSeparator$UI_HelpCancel"
 
-                With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
-                    Set-UiCursorPosition $bx ($by + 1); [Console]::Write($UI_Frame_Vertical + " ")
-                    Set-UiCursorPosition ($bx + $boxW - 2) ($by + 1); [Console]::Write(" " + $UI_Frame_Vertical)
+                    With-ConsoleColor ($UI_Color_MenuFrame) ($UI_Color_Background) {
+                        Set-UiCursorPosition $bx ($by + 1); [Console]::Write($UI_Frame_Vertical + " ")
+                        Set-UiCursorPosition ($bx + $boxW - 2) ($by + 1); [Console]::Write(" " + $UI_Frame_Vertical)
+                    }
+                    Write-UiHeaderContent ($bx + 2) ($by + 1) $innerWHeader $headerTitle $headerHelp
                 }
-                Write-UiHeaderContent ($bx + 2) ($by + 1) $innerWHeader $headerTitle $headerHelp
 
                 Write-At $bx ($by + 2) ($UI_Frame_MiddleLeft + ($UI_Frame_Horizontal * ($boxW - 2)) + $UI_Frame_MiddleRight) ($UI_Color_MenuFrame)
 
@@ -3755,8 +3765,10 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
             }
 
             try {
+                $contentOnly = $false
                 while ($true) {
-                    _DrawInputBox
+                    _DrawInputBox -ContentOnly:$contentOnly
+                    $contentOnly = $true
                     $k = Read-TextEditorKey
 
                     if ($k.Key -eq [ConsoleKey]::Escape) { return $null }
