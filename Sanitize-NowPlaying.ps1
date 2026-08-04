@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.0.7"
+$ScriptVersion = "2.1.0"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -252,7 +252,6 @@ $script:OutFileRt     = $OutFileRt
 $OutFileRtPlus        = 'C:\RDS\nowplaying_rtplus.txt'
 $script:OutFileRtPlus = $OutFileRtPlus
 
-try { [NativeExitFlush]::Update($script:PrefixFile, $script:ArtistFile, $script:ConnectorFile, $script:TitleFile, $script:OutFileRt, $script:OutFileRtPlus) } catch { }
 # -------------------------------------------------------------------------------------------------
 # Persistent settings (single file)
 #
@@ -1316,18 +1315,40 @@ try {
     $createdNew   = $false
     $script:Mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$createdNew)
 
-    if (-not $createdNew) {
-        if (-not $script:Mutex.WaitOne(0, $false)) {
+    if ($createdNew) {
+        $script:MutexHasHandle = $true
+    } else {
+        try {
+            $script:MutexHasHandle = $script:Mutex.WaitOne(0, $false)
+        } catch [System.Threading.AbandonedMutexException] {
+            # WaitOne grants ownership before reporting that the previous owner ended unexpectedly.
+            $script:MutexHasHandle = $true
+        }
+
+        if (-not $script:MutexHasHandle) {
+            # This process does not own the active session. Keep the native exit handler unarmed so
+            # this rejected instance can never truncate output files of the running instance.
+            try { [NativeExitFlush]::Update($null, $null, $null, $null, $null, $null) } catch { }
+            try { if ($script:Mutex) { $script:Mutex.Dispose() } } catch { }
+            $script:Mutex = $null
+
             try { Clear-Host } catch { }
             Show-StartupToast -Message "Another instance is already running."
             exit 0
         }
     }
-
-    $script:MutexHasHandle = $true
 } catch {
+    # Never continue without a reliable one-instance lock. The native flush is still unarmed here.
+    try {
+        if ($script:MutexHasHandle -and $script:Mutex) { $script:Mutex.ReleaseMutex() | Out-Null }
+    } catch { }
+    try { if ($script:Mutex) { $script:Mutex.Dispose() } } catch { }
     $script:Mutex          = $null
     $script:MutexHasHandle = $false
+
+    try { Clear-Host } catch { }
+    Show-StartupToast -Message "Unable to establish single-instance protection."
+    exit 1
 }
 
 # -------------------- Health / elapsed color tuning ---------------------------
@@ -6446,7 +6467,7 @@ function Get-ArtistNameKeys([string]$artist) {
 
     # Use Regex.Split with explicit options (avoid PowerShell -split option quirks).
     $rx = New-Object System.Text.RegularExpressions.Regex(
-    "\s*(?:,|&|/|;|\+|\band\b|\bfeat\.?(?=\s|$)|\bft\.?(?=\s|$)|\bfeaturing\b)\s*",
+    "\s*(?:,|&|/|;|\+|\band\b|\bfeat\.?(?=\s|$)|\bft\.?(?=\s|$)|\bfeaturing\b)\s*|\s+(?:x|×|vs\.?)\s+",
     [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
     )
 
@@ -6479,6 +6500,88 @@ function GuestIsAlreadyCreditedInArtist([string]$artist, [string]$guest) {
     if ([string]::IsNullOrWhiteSpace($gKey)) { return $false }
 
     return $set.Contains($gKey)
+}
+
+function Promote-TrailingGuestCredit([string]$artist, [string]$title) {
+    $result = [pscustomobject]@{ Artist = $artist; Title = $title }
+    if ([string]::IsNullOrWhiteSpace($artist) -or [string]::IsNullOrWhiteSpace($title)) { return $result }
+
+    # Promote only an explicit, fully bracketed guest credit at the absolute end of the title.
+    # Accepted labels: feat / feat. / ft / ft. / featuring / duet with / duett with.
+    # Bare tails, plain "with", mismatched/nested brackets and obvious role/instrument metadata remain untouched.
+    $kw = "(?:(?:feat|ft)\.?(?=\s)|featuring\b|duett?\s+with\b)"
+    $m  = [regex]::Match(
+        $title,
+        "^(?<h>.+?)\s*(?:\(\s*${kw}\s+(?<g>[^()\[\]\{\}\r\n]{2,64}?)\s*\)|\[\s*${kw}\s+(?<g>[^()\[\]\{\}\r\n]{2,64}?)\s*\])\s*$",
+        "IgnoreCase"
+    )
+    if (-not $m.Success) { return $result }
+
+    $head  = Cleanup-Whitespace $m.Groups["h"].Value
+    $guest = Cleanup-Whitespace $m.Groups["g"].Value
+
+    if ([string]::IsNullOrWhiteSpace($head) -or [string]::IsNullOrWhiteSpace($guest)) { return $result }
+    if ($head -notmatch '[\p{L}\p{Nd}]' -or $guest -notmatch '\p{L}') { return $result }
+
+    # An incomplete existing collaboration separator makes the artist field ambiguous.
+    # Leave both fields untouched rather than risk producing a doubled or malformed credit.
+    if ([regex]::IsMatch($artist, '(?:[,;/&+]|\b(?:and|feat|ft|featuring|with|vs)\.?)\s*$', 'IgnoreCase') -or
+        [regex]::IsMatch($artist, '(?:\sx|×)\s*$')) { return $result }
+
+    # Reject the promotion when the remaining title contains unmatched or incorrectly nested brackets.
+    $expectedClosers = ""
+    foreach ($ch in $head.ToCharArray()) {
+        switch ($ch) {
+            '(' { $expectedClosers += ')' }
+            '[' { $expectedClosers += ']' }
+            '{' { $expectedClosers += '}' }
+            ')' { if (-not $expectedClosers.EndsWith(')')) { return $result }; $expectedClosers = $expectedClosers.Substring(0, $expectedClosers.Length - 1) }
+            ']' { if (-not $expectedClosers.EndsWith(']')) { return $result }; $expectedClosers = $expectedClosers.Substring(0, $expectedClosers.Length - 1) }
+            '}' { if (-not $expectedClosers.EndsWith('}')) { return $result }; $expectedClosers = $expectedClosers.Substring(0, $expectedClosers.Length - 1) }
+        }
+    }
+    if ($expectedClosers.Length -ne 0) { return $result }
+
+    if ([regex]::IsMatch($guest, '[:!?=<>|]')) { return $result }
+    if ([regex]::IsMatch($guest, '^\s*[-–—,;/&+]|[-–—,;/&+]\s*$')) { return $result }
+    if ([regex]::IsMatch($guest, '\b(?:feat|ft|featuring|duett?\s+with)\b', 'IgnoreCase')) { return $result }
+    if ([regex]::IsMatch($guest, '\b(?:remix|mix|version|edit|live|remaster(?:ed)?|instrumental|karaoke|mono|stereo)\b', 'IgnoreCase')) { return $result }
+    if ([regex]::IsMatch($guest, '^(?:(?:the\s+)?(?:audience|crowd)|(?:(?:guest|lead|backing|background)\s+)?(?:vocals?|guitars?|bass|drums?|percussion|piano|keyboards?|sax(?:ophone)?|trumpet|violin|cello)(?:\s+(?:solo|by)\b.*)?)$', 'IgnoreCase')) { return $result }
+
+    # Evaluate compound credits component-by-component. Promote only when none are already credited;
+    # strip only when all are already credited. A partial overlap is deliberately left untouched.
+    $guestTokens = [regex]::Split(
+        $guest,
+        "\s*(?:,|&|/|;|\+|\band\b)\s*|\s+(?:x|×|vs\.?)\s+",
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+
+    # Recognize an explicit trailing "with <guest>" credit in ARTIST without globally treating
+    # every occurrence of "with" as an artist separator.
+    $withKeys = $null
+    $mWith = [regex]::Match($artist, '\bwith\s+(?<g>.+?)\s*$', 'IgnoreCase')
+    if ($mWith.Success) { $withKeys = Get-ArtistNameKeys $mWith.Groups["g"].Value }
+
+    $creditedCount = 0
+    foreach ($g in $guestTokens) {
+        $gg = Cleanup-Whitespace $g
+        if ([string]::IsNullOrWhiteSpace($gg)) { return $result }
+
+        $credited = GuestIsAlreadyCreditedInArtist $artist $gg
+        if (-not $credited -and $null -ne $withKeys) {
+            $gKey = Normalize-NameKey $gg
+            if ($gKey -and $withKeys.Contains($gKey)) { $credited = $true }
+        }
+
+        if ($credited) { $creditedCount++ }
+    }
+
+    if ($creditedCount -eq $guestTokens.Count) {
+        return [pscustomobject]@{ Artist = $artist; Title = $head }
+    }
+    if ($creditedCount -gt 0) { return $result }
+
+    return [pscustomobject]@{ Artist = (Cleanup-Whitespace "$artist & $guest"); Title = $head }
 }
 
 function Strip-FeatInTitleIfGuestsAlreadyInArtist([string]$artist, [string]$title) {
@@ -8203,6 +8306,11 @@ function Normalize-NowPlayingParts([string]$raw) {
     $title = Strip-CompilationTail $title
     $title = Strip-SeparatedYearTail $title
 
+    # Extremely conservative promotion of an explicit trailing guest credit from TITLE to ARTIST.
+    $guestCredit = Promote-TrailingGuestCredit $artist $title
+    $artist      = $guestCredit.Artist
+    $title       = $guestCredit.Title
+
     if ([string]::IsNullOrWhiteSpace($artist) -and [string]::IsNullOrWhiteSpace($title)) { return $null }
 
     # Remove version-like tails first (so "feat/with/met" stripping sees a clean title).
@@ -8300,6 +8408,9 @@ if (-not (Show-WorkDirWizardIfNeeded)) {
     return
 }
 Apply-WorkDirIfConfigured
+
+# Arm the hard-exit flush only after this process owns the mutex and the final IO paths are known.
+try { [NativeExitFlush]::Update($script:PrefixFile, $script:ArtistFile, $script:ConnectorFile, $script:TitleFile, $script:OutFileRt, $script:OutFileRtPlus) } catch { }
 
 # -------------------- Watcher (Wait-Event) -----------------------------------
 
@@ -8739,6 +8850,11 @@ try {
 
     try { Clear-OutputsFast } catch { }
 
+    # Complete the final truncation while the mutex is still owned, then disarm the ProcessExit
+    # safety net before releasing the mutex so it cannot affect a newly started successor instance.
+    try { [NativeExitFlush]::Flush() } catch { }
+    try { [NativeExitFlush]::Update($null, $null, $null, $null, $null, $null) } catch { }
+
     try {
         if ($script:fsw) {
             $script:fsw.EnableRaisingEvents = $false
@@ -8752,6 +8868,7 @@ try {
     try {
         if ($script:MutexHasHandle -and $script:Mutex) { $script:Mutex.ReleaseMutex() | Out-Null }
     } catch { }
+    $script:MutexHasHandle = $false
     try {
         if ($script:Mutex) { $script:Mutex.Dispose() }
     } catch { }
