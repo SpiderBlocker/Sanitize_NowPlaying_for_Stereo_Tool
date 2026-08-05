@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.1.0"
+$ScriptVersion = "2.1.1"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -4381,32 +4381,8 @@ function Test-HeartbeatRowVisibleDuringOverlay {
 function Update-HeartbeatDuringOverlayIfVisible {
     if (-not (Test-HeartbeatRowVisibleDuringOverlay)) { return }
 
-    # Preserve a text editor's live input cursor; ordinary menus normally keep it hidden.
-    $cursorLeft              = 0
-    $cursorTop               = 0
-    $cursorVisible           = $false
-    $cursorPositionCaptured  = $false
-    $cursorVisibilityCaptured = $false
-    try {
-        $cursorLeft             = [Console]::CursorLeft
-        $cursorTop              = [Console]::CursorTop
-        $cursorPositionCaptured = $true
-    } catch { }
-    try {
-        $cursorVisible            = [Console]::CursorVisible
-        $cursorVisibilityCaptured = $true
-    } catch { }
-
-    try {
-        Update-HeartbeatFields
-    } finally {
-        if ($cursorPositionCaptured) {
-            try { [Console]::SetCursorPosition($cursorLeft, $cursorTop) } catch { }
-        }
-        if ($cursorVisibilityCaptured) {
-            try { [Console]::CursorVisible = $cursorVisible } catch { }
-        }
-    }
+    # Update uncovered heartbeat cells without touching the active console cursor or its blink phase.
+    Update-HeartbeatFields -CursorNeutral
 }
 
 function Set-NextHeartbeatElapsedRender([int]$ActualAgeSec) {
@@ -4685,7 +4661,7 @@ function Write-SegmentedLine(
     }
 }
 
-function Write-AtSegments([int]$x, [int]$y, [object[]]$segments, [ConsoleColor]$defaultFg, [bool]$PadLine = $true) {
+function Write-AtSegments([int]$x, [int]$y, [object[]]$segments, [ConsoleColor]$defaultFg, [bool]$PadLine = $true, [switch]$CursorNeutral) {
     $w   = Get-UiWidth $UI_MinRenderWidth
     $max = [Math]::Max(0, $w - $x - 1)
 
@@ -4711,6 +4687,46 @@ function Write-AtSegments([int]$x, [int]$y, [object[]]$segments, [ConsoleColor]$
 
     $plain = Pad-OrEllipsize $plain $max
     if ($PadLine -and $x -eq 0 -and $max -gt 0) { $plain = $plain.PadRight($max) }
+
+    if ($CursorNeutral -and -not $script:UiClipActive) {
+        try {
+            if (-not (Initialize-UiRegionSnapshotNative)) { return $false }
+
+            $fgMap = ""
+            $pos   = 0
+            foreach ($s in $segments) {
+                if ($pos -ge $plain.Length) { break }
+                $segText = Get-SegText $s
+                if ([string]::IsNullOrEmpty($segText)) { continue }
+
+                $remaining = $plain.Length - $pos
+                if ($segText.Length -gt $remaining) { $segText = $segText.Substring(0, $remaining) }
+
+                $fg     = [char][int](Get-SegFg $s $defaultFg)
+                $fgMap += ([string]$fg).PadRight($segText.Length, $fg)
+                $pos   += $segText.Length
+            }
+            if ($pos -lt $plain.Length) {
+                $fg      = [char][int]$defaultFg
+                $fgMap  += ([string]$fg).PadRight(($plain.Length - $pos), $fg)
+            }
+
+            $snapshot = [Win.ConsoleRegionNative]::Capture(
+                ($x + $script:UiOffsetX), ($y + $script:UiOffsetY), $plain.Length, 1
+            )
+            if ($null -eq $snapshot) { return $false }
+
+            $bg = (([int]$script:BaseBg -band 0x0F) -shl 4)
+            for ($i = 0; $i -lt $plain.Length; $i++) {
+                $cell             = $snapshot.Cells[$i]
+                $cell.UnicodeChar = $plain[$i]
+                $cell.Attributes  = [uint16]($bg -bor ([int]$fgMap[$i] -band 0x0F))
+                $snapshot.Cells[$i] = $cell
+            }
+
+            return [Win.ConsoleRegionNative]::Restore($snapshot)
+        } catch { return $false }
+    }
 
     # Preserve the established fast path for normal rendering. During a clipped restore, route
     # each colored segment through Write-At so the same rectangle is applied consistently.
@@ -5448,7 +5464,7 @@ function Render-SettingsAndLegend {
     Write-At ($xExit + 21) ($script:StatusTop + 12) " Exit" ($UI_Color_DimText)
 }
 
-function Update-HeartbeatFields {
+function Update-HeartbeatFields([switch]$CursorNeutral) {
     $now = Get-Date
     $age = $now - $script:LastGoodUpdate
     if ($age.TotalSeconds -lt 0) { $age = [TimeSpan]::Zero }
@@ -5492,7 +5508,11 @@ function Update-HeartbeatFields {
     @{ Text = " ago";       Fg = $script:BaseFg }
     )
 
-    Write-AtSegments 0 ($script:StatusTop + 9) $segments $script:BaseFg $true
+    if ($CursorNeutral) {
+        if (-not (Write-AtSegments 0 ($script:StatusTop + 9) $segments $script:BaseFg $true -CursorNeutral)) { return }
+    } else {
+        Write-AtSegments 0 ($script:StatusTop + 9) $segments $script:BaseFg $true
+    }
 
     $script:LastHeartbeatClock     = $clock
     $script:LastHeartbeatElapsed   = $elapsedToken
