@@ -4,7 +4,7 @@ Lightweight PowerShell tool that monitors and normalizes `nowplaying.txt` metada
 
 Designed for small and semi-professional FM stations that want clean, broadcast-ready RDS metadata with minimal manual library tagging.
 
-This project was created through iterative co-development with ChatGPT 5.2 / 5.5 / 5.6, combining AI-assisted development with hands-on design, testing, and optimization.
+This project was created through iterative co-development, combining AI-assisted development with hands-on design, testing, and optimization.
 
 
 # Features
