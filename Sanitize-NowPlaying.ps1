@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.1.1"
+$ScriptVersion = "2.1.2"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -637,12 +637,21 @@ function Convert-CustomTextForOutput([string]$text, [switch]$NoLengthLimit) {
 }
 
 function Load-TransliterationSetting {
-    # Settings are loaded once at startup from $SettingsFile into $script:Settings.
-    $script:TransliterationEnabled = Load-SettingBool 'TransliterationEnabled' $script:Settings.TransliterationEnabled
+    # Persist the user's preference independently from ASCII-safe's temporary runtime force.
+    $preferred = Load-SettingBool 'TransliterationEnabled' $script:Settings.TransliterationEnabled
+    $script:TranslitPrevBeforeAsciiSafe = $preferred
+    $script:TransliterationEnabled      = $preferred
+    $script:TranslitForcedByAsciiSafe   = $false
+
+    if ($script:AsciiSafeEnabled -and -not $preferred) {
+        $script:TransliterationEnabled    = $true
+        $script:TranslitForcedByAsciiSafe = $true
+    }
 }
 
 function Save-TransliterationSetting {
-    Save-SettingBool 'TransliterationEnabled' $script:TransliterationEnabled
+    $preferred = $(if ($script:TranslitForcedByAsciiSafe) { $script:TranslitPrevBeforeAsciiSafe } else { $script:TransliterationEnabled })
+    Save-SettingBool 'TransliterationEnabled' $preferred
 }
 
 function Apply-DelimiterFromSettings {
@@ -4462,24 +4471,26 @@ function Invoke-MenuIdleTick {
 }
 
 function Toggle-AsciiSafe {
+    if (-not $script:AsciiSafeEnabled) {
+        $script:TranslitPrevBeforeAsciiSafe = $script:TransliterationEnabled
+    }
+
     $script:AsciiSafeEnabled = -not $script:AsciiSafeEnabled
     Save-AsciiSafeSetting
 
     # If ASCII-safe is enabled while transliteration is OFF, temporarily force transliteration ON
-    # to avoid dropping Greek/Cyrillic content entirely.
+    # without overwriting the persisted user preference.
     if ($script:AsciiSafeEnabled) {
+        $script:TranslitForcedByAsciiSafe = $false
         if (-not $script:TransliterationEnabled) {
-            $script:TranslitPrevBeforeAsciiSafe = $false
-            $script:TransliterationEnabled      = $true
-            $script:TranslitForcedByAsciiSafe   = $true
-            Save-TransliterationSetting
+            $script:TransliterationEnabled    = $true
+            $script:TranslitForcedByAsciiSafe = $true
         }
     } else {
         # When ASCII-safe is turned OFF, restore the previous transliteration state if we forced it.
         if ($script:TranslitForcedByAsciiSafe) {
             $script:TransliterationEnabled    = $script:TranslitPrevBeforeAsciiSafe
             $script:TranslitForcedByAsciiSafe = $false
-            Save-TransliterationSetting
         }
     }
 
@@ -4491,10 +4502,9 @@ function Toggle-Transliteration {
     # If ASCII-safe is enabled, transliteration must remain effectively ON.
     if ($script:AsciiSafeEnabled) { return $false }
 
-    $script:TranslitForcedByAsciiSafe   = $false
+    $script:TranslitForcedByAsciiSafe = $false
+    $script:TransliterationEnabled    = -not $script:TransliterationEnabled
     $script:TranslitPrevBeforeAsciiSafe = $script:TransliterationEnabled
-
-    $script:TransliterationEnabled = -not $script:TransliterationEnabled
     Save-TransliterationSetting
     try { Refresh-UiAfterSettingChange } catch { }
     return $true
@@ -4514,6 +4524,11 @@ function Handle-Hotkeys {
             try { Draw-Header } catch { }
             $script:RebuildWatcher = $true
         }
+
+        # The F10 dialog does not cover the footer row, so its close/restore path cannot refresh
+        # stale setting tokens there. Re-render the legend unconditionally from live runtime state;
+        # this remains independent of Do-Update and therefore preserves warning-state semantics.
+        try { Render-SettingsAndLegend } catch { }
 
         # IMPORTANT: When the input is currently in a warning state (Expired / NotAvailable),
         # do NOT trigger an immediate Do-Update() on menu exit. That would:
@@ -4858,8 +4873,8 @@ function Test-OutputWriteFailed([string]$label) {
 }
 
 function Write-LiveOutputRows {
-    # Full CONTENT-block render. Used only for initial layout, resize and overlay restoration.
-    # Labels and separators are static; only the values use state-dependent colors.
+    # Full CONTENT-block render. Used for initial layout, resize, overlay restoration and label-state changes.
+    # Derived-output labels follow their value state; separators remain static.
     $contextWidth = 13
     $contentPart  = 'CONTENT'.PadRight($contextWidth)
     $indentPart   = (' ' * $contextWidth)
@@ -4886,20 +4901,20 @@ function Write-LiveOutputRows {
     }
 
     Write-SegmentedLine 0 ($script:StatusTop + 1) $contentPart $UI_Color_SectionTitle $labIn $UI_Color_Input     $sepPart $UI_Color_FieldSeparator $rawInput $script:LastInFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 2) $indentPart  $script:BaseFg          $labPx $UI_Color_Prefix    $sepPart $UI_Color_FieldSeparator $prefixOut $script:LastPxFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 2) $indentPart  $script:BaseFg          $labPx $script:LastPxFg    $sepPart $UI_Color_FieldSeparator $prefixOut $script:LastPxFg $true
 
     if (Test-TitleFirstOrder) {
-        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labTi $UI_Color_Title     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
-        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $UI_Color_Connector $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
-        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labAr $UI_Color_Artist    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
+        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labTi $script:LastTitleFg     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
+        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $script:LastConnectorFg $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
+        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labAr $script:LastArtistFg    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
     } else {
-        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $UI_Color_Artist    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
-        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $UI_Color_Connector $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
-        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $UI_Color_Title     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
+        Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $script:LastArtistFg    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
+        Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $script:LastConnectorFg $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
+        Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $script:LastTitleFg     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
     }
 
-    Write-SegmentedLine 0 ($script:StatusTop + 6) $indentPart $script:BaseFg $labRt $UI_Color_RT     $sepPart $UI_Color_FieldSeparator $rtText     $script:LastRtFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 7) $indentPart $script:BaseFg $labRp $UI_Color_RTPlus $sepPart $UI_Color_FieldSeparator $rtPlusText $script:LastRpFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 6) $indentPart $script:BaseFg $labRt $script:LastRtFg     $sepPart $UI_Color_FieldSeparator $rtText     $script:LastRtFg $true
+    Write-SegmentedLine 0 ($script:StatusTop + 7) $indentPart $script:BaseFg $labRp $script:LastRpFg $sepPart $UI_Color_FieldSeparator $rtPlusText $script:LastRpFg $true
     Write-At 0 ($script:StatusTop + 8) "" $script:BaseFg $true
 
     $script:LiveOutputLayoutValid = $true
@@ -5624,6 +5639,8 @@ function Update-Status(
     $rtFg = if ($rtText       -eq "<none>") { $UI_Color_DimText } else { $UI_Color_RT }
     $rpFg = if ($rtPlusText   -eq "<none>") { $UI_Color_DimText } else { $UI_Color_RTPlus }
 
+    $outputLabelColorsChanged = ($pxFg -ne $script:LastPxFg -or $arFg -ne $script:LastArtistFg -or $cnFg -ne $script:LastConnectorFg -or $tiFg -ne $script:LastTitleFg -or $rtFg -ne $script:LastRtFg -or $rpFg -ne $script:LastRpFg)
+
     $script:LastInFg        = $inFg
     $script:LastPxFg        = $pxFg
     $script:LastArtistFg    = $arFg
@@ -5632,7 +5649,9 @@ function Update-Status(
     $script:LastRtFg        = $rtFg
     $script:LastRpFg        = $rpFg
 
-    try { Write-LiveOutputValues } catch { }
+    try {
+        if ($outputLabelColorsChanged) { Write-LiveOutputRows } else { Write-LiveOutputValues }
+    } catch { }
 
     $script:LastInputUiState = $inputState
 }
@@ -8398,8 +8417,8 @@ try { Load-ArtistTitleOrderSetting } catch { }
 try { Apply-DelimiterFromSettings } catch { }
 # Apply persisted toggles (best-effort, robust against missing keys).
 try { if ($script:Settings.ContainsKey('PrefixLanguageCode'))     { $script:PrefixLanguageCode     = "$($script:Settings['PrefixLanguageCode'])".Trim().ToUpperInvariant() } } catch { }
-try { if ($script:Settings.ContainsKey('TransliterationEnabled')) { $script:TransliterationEnabled = [bool]$script:Settings['TransliterationEnabled'] } } catch { }
 try { if ($script:Settings.ContainsKey('AsciiSafeEnabled'))       { $script:AsciiSafeEnabled       = [bool]$script:Settings['AsciiSafeEnabled'] } } catch { }
+try { Load-TransliterationSetting } catch { }
 try { if ($script:Settings.ContainsKey('DelimiterKey') -and $script:Settings['DelimiterKey']) { $script:DelimiterKey = "$($script:Settings['DelimiterKey'])".Trim().ToUpperInvariant() } } catch { }
 
 # Re-apply the prefix text after loading the unified settings file.
@@ -8444,7 +8463,7 @@ function Initialize-Watcher {
     } catch { }
 
     try {
-        foreach ($id in @("NP_Changed","NP_Created","NP_Renamed")) {
+        foreach ($id in @("NP_Changed","NP_Created","NP_Renamed","NP_Deleted")) {
             try { Unregister-Event -SourceIdentifier $id -Force -ErrorAction SilentlyContinue } catch { }
         }
         try { Get-Event | Remove-Event -ErrorAction SilentlyContinue } catch { }
@@ -8466,6 +8485,7 @@ function Initialize-Watcher {
     $null = Register-ObjectEvent -InputObject $script:fsw -EventName Changed -SourceIdentifier "NP_Changed"
     $null = Register-ObjectEvent -InputObject $script:fsw -EventName Created -SourceIdentifier "NP_Created"
     $null = Register-ObjectEvent -InputObject $script:fsw -EventName Renamed -SourceIdentifier "NP_Renamed"
+    $null = Register-ObjectEvent -InputObject $script:fsw -EventName Deleted -SourceIdentifier "NP_Deleted"
 }
 
 $null = Ensure-WorkDirOrFallback
@@ -8474,7 +8494,8 @@ Initialize-Watcher
 $script:LastStamp = ""
 
 function Get-InputStamp {
-    if (-not (Test-Path -LiteralPath $InFile)) { return "" }
+    # A non-empty missing-file sentinel lets the fallback poll detect existed -> missing transitions.
+    if (-not (Test-Path -LiteralPath $InFile)) { return "<missing>" }
     try {
         $fi = Get-Item -LiteralPath $InFile -ErrorAction Stop
         return ("{0:o}|{1}" -f $fi.LastWriteTimeUtc, $fi.Length)

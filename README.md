@@ -4,7 +4,7 @@ Lightweight PowerShell tool that monitors and normalizes `nowplaying.txt` metada
 
 Designed for small and semi-professional FM stations that want clean, broadcast-ready RDS metadata with minimal manual library tagging.
 
-This project was created through iterative co-development, combining AI-assisted development with hands-on design, testing, and optimization.
+This project was created through iterative co-development with ChatGPT 5.2 / 5.5 / 5.6, combining AI-assisted development with hands-on design, testing, and optimization.
 
 
 # Features
@@ -31,10 +31,10 @@ All output files are written as UTF-8 without BOM in the selected working direct
 
 | File | Contents |
 | --- | --- |
-| `nowplaying_prefix.txt` | Selected multilingual prefix or custom prefix text, or empty |
-| `nowplaying_artist.txt` | Sanitized artist, independently limited to 64 characters, or empty |
-| `nowplaying_connector.txt` | Configured connector with surrounding spaces when both artist and title are present, or empty |
-| `nowplaying_title.txt` | Sanitized title, independently limited to 64 characters, or empty |
+| `prefix.txt` | Selected multilingual prefix or custom prefix text, or empty |
+| `artist.txt` | Sanitized artist, independently limited to 64 characters, or empty |
+| `connector.txt` | Configured connector with surrounding spaces when both artist and title are present, or empty |
+| `title.txt` | Sanitized title, independently limited to 64 characters, or empty |
 | `nowplaying_rt.txt` | Compact combined RadioText in the configured artist/title order, or empty |
 | `nowplaying_rtplus.txt` | Compact RT+ tagged text in the same configured order, or empty |
 
