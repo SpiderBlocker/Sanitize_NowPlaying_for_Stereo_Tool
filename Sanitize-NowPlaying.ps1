@@ -4518,10 +4518,22 @@ function Handle-Hotkeys {
 
     # Settings menu: F10 / Ctrl+S
     if ($k.Key -eq [ConsoleKey]::F10 -or ($k.Key -eq [ConsoleKey]::S -and ($k.Modifiers -band [ConsoleModifiers]::Control))) {
-        $changed = Show-SettingsMenu
+        $orderBefore = Normalize-ArtistTitleOrder $script:ArtistTitleOrder
+        $changed     = Show-SettingsMenu
+        $orderChanged = ($orderBefore -ne (Normalize-ArtistTitleOrder $script:ArtistTitleOrder))
+
         if ($changed) {
             try { Apply-WorkDirIfConfigured } catch { }
             try { Draw-Header } catch { }
+
+            # Artist/title order changes alter the static row layout in CONTENT as well as FILES.
+            # Rebuild it immediately so subsequent value-only refreshes cannot land under stale labels,
+            # including while input is Expired/NotAvailable and Do-Update is intentionally suppressed.
+            if ($orderChanged) {
+                $script:LiveOutputLayoutValid = $false
+                try { Write-LiveOutputRows } catch { }
+            }
+
             $script:RebuildWatcher = $true
         }
 
