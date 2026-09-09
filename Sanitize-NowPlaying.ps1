@@ -4464,7 +4464,9 @@ function Invoke-MenuIdleTick {
     $script:NextOverlayConsolePollUtc = $nowUtc.AddMilliseconds($UI_OverlayConsolePollMs)
 
     try {
-        if (Enforce-FixedConsoleLayout) { $script:OverlayNeedsRedraw = $true }
+        if ([bool]$env:WT_SESSION -or -not $EnableConsoleResizeLock) {
+            if (Enforce-FixedConsoleLayout) { $script:OverlayNeedsRedraw = $true }
+        }
     } catch { }
     try { Lock-ConsoleScrolling } catch { }
     try { [Console]::CursorVisible = $false } catch { }
@@ -4959,7 +4961,6 @@ function Write-LiveOutputValues {
 }
 
 function Redraw-Ui {
-    try { Clear-Host } catch { }
     try { [Console]::CursorVisible = $false } catch { }
 
     $script:UiInited = $false
@@ -5108,9 +5109,19 @@ function Ensure-UiFresh {
     }
 
     if ($w -ne $script:LastConsoleW -or $h -ne $script:LastConsoleH) {
-        $script:LastConsoleW = $w
-        $script:LastConsoleH = $h
-        Redraw-Ui
+        # In locked classic conhost the user cannot resize the window, so ignore transient
+        # runtime dimension reports (notably during minimize/restore). Startup sizing remains enforced.
+        if ([bool]$env:WT_SESSION -or -not $EnableConsoleResizeLock) {
+            try { [void](Enforce-FixedConsoleLayout) } catch { }
+            try { $w = [Console]::WindowWidth } catch { }
+            try { $h = [Console]::WindowHeight } catch { }
+
+            if ($w -ne $script:LastConsoleW -or $h -ne $script:LastConsoleH) {
+                $script:LastConsoleW = $w
+                $script:LastConsoleH = $h
+                Redraw-Ui
+            }
+        }
     }
 
     # Keep the UI anchored at the top-left so mouse-wheel/scrollbar attempts cannot move it out of view.
