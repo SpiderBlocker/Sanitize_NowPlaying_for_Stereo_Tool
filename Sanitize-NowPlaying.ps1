@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.1.3"
+$ScriptVersion = "2.1.4"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -811,11 +811,13 @@ Apply-PrefixFromLanguage
 
 # -------------------------------------------------------------------------------------------------
 
-$MaxLen     = 64
-$DebounceMs = 250
+$MaxLen                   = 64
+$InputStableCheckMs       = 20
+$InputQuietStableMs       = 60  # Missing/unreadable/empty input gets a wider stability window.
+$InputStableMaxWaitMs     = 250 # Preserve the former debounce interval as a hard upper bound.
 
 # Main-loop idle poll cadence. The heartbeat itself redraws only when its visible value changes.
-$PollIntervalMs = 100
+$PollIntervalMs = 25
 
 $ReadRetryCount   = 20
 $ReadRetryDelayMs = 50
@@ -6932,6 +6934,51 @@ function Read-NowPlayingStable([string]$path) {
     return (Read-TextRobust $path)
 }
 
+function Wait-ForInputStability([string]$path) {
+    # Replace the fixed debounce delay with successive exact content snapshots. Transiently missing,
+    # unreadable or empty input is treated more conservatively before Do-Update takes over.
+    $timer         = [System.Diagnostics.Stopwatch]::StartNew()
+    $previous      = $null
+    $stableSinceMs = [long]0
+
+    while (-not $script:Stopping) {
+        $quiet = $true
+
+        if (-not (Test-Path -LiteralPath $path)) {
+            $snapshot = "M"
+        } else {
+            try {
+                $raw = [string](Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop)
+                $snapshot = "P`0$raw"
+                $quiet = [string]::IsNullOrWhiteSpace(($raw -replace "^\uFEFF", ""))
+            } catch {
+                try {
+                    $raw = [string](Get-Content -LiteralPath $path -Raw -Encoding Default -ErrorAction Stop)
+                    $snapshot = "P`0$raw"
+                    $quiet = [string]::IsNullOrWhiteSpace(($raw -replace "^\uFEFF", ""))
+                } catch {
+                    $snapshot = "U"
+                }
+            }
+        }
+
+        $nowMs = [long]$timer.ElapsedMilliseconds
+        if ($null -eq $previous -or -not ([string]::Equals($snapshot, $previous, [System.StringComparison]::Ordinal))) {
+            $previous      = $snapshot
+            $stableSinceMs = $nowMs
+        }
+
+        $requiredStableMs = $(if ($quiet) { $InputQuietStableMs } else { $InputStableCheckMs })
+        if (($nowMs - $stableSinceMs) -ge $requiredStableMs -or $nowMs -ge $InputStableMaxWaitMs) { break }
+
+        $remainingMs = $InputStableMaxWaitMs - [int]$timer.ElapsedMilliseconds
+        if ($remainingMs -le 0) { break }
+        Wait-WithHeartbeat ([Math]::Min($InputStableCheckMs, $remainingMs))
+    }
+
+    $timer.Stop()
+}
+
 function Write-Utf8NoBomAtomic([string]$path, [string]$text, [string]$tmpName) {
     # Atomic UTF-8 (no BOM) write: write to temp file in same directory, then move over the destination.
     # Returns $true on success, $false on failure (and stores the error message in $script:LastWriteError).
@@ -8865,7 +8912,7 @@ try {
 
         Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
 
-        Wait-WithHeartbeat $DebounceMs
+        Wait-ForInputStability $InFile
 
         while ($true) {
             $evt2 = Wait-Event -Timeout 0
