@@ -14,7 +14,7 @@
 #
 # Console UI:
 # - Distinguishes compact RT/RT+ outputs from separately composable PREFIX, ARTIST, CONNECTOR and TITLE outputs.
-# - Compact RT/RT+ artist/title order follows the persistent Artist/title order setting; standalone component rows remain fixed.
+# - Compact RT/RT+ and the standalone component rows follow the persistent Artist/title order setting.
 # - Heartbeat status bar with clock + elapsed-since-update indicator.
 #
 # Notes:
@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.1.4"
+$ScriptVersion = "2.1.5"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -297,7 +297,7 @@ $script:Settings = @{
     PrefixLanguageCode     = 'EN'
     CustomPrefixText       = ''     # Used when PrefixLanguageCode = CUSTOM.
     ConnectorText          = '-'    # Separate output; automatically padded with one space on each side.
-    ArtistTitleOrder       = 'ARTIST_TITLE' # ARTIST_TITLE or TITLE_ARTIST; controls compact RT/RT+ field order only.
+    ArtistTitleOrder       = 'ARTIST_TITLE' # ARTIST_TITLE or TITLE_ARTIST; controls compact RT/RT+ and UI component order.
     TransliterationEnabled = $true
     AsciiSafeEnabled       = $false
     WorkDirWizardDone      = $false
@@ -4522,11 +4522,15 @@ function Handle-Hotkeys {
 
     # Settings menu: F10 / Ctrl+S
     if ($k.Key -eq [ConsoleKey]::F10 -or ($k.Key -eq [ConsoleKey]::S -and ($k.Modifiers -band [ConsoleModifiers]::Control))) {
+        $orderBefore = $script:ArtistTitleOrder
         $changed = Show-SettingsMenu
 
         if ($changed) {
             try { Apply-WorkDirIfConfigured } catch { }
             try { Draw-Header } catch { }
+            if ($script:ArtistTitleOrder -ne $orderBefore) {
+                try { Write-LiveOutputRows } catch { }
+            }
             $script:RebuildWatcher = $true
         }
 
@@ -4900,6 +4904,14 @@ function Write-LiveOutputRows {
     $titleOut     = [string]$script:LastTitleShown
     $rtText       = [string]$script:LastRtTextShown
     $rtPlusText   = [string]$script:LastRtPlusTextShown
+    $arFg         = $script:LastArtistFg
+    $tiFg         = $script:LastTitleFg
+
+    if (Test-TitleFirstOrder) {
+        $labAr, $labTi = $labTi, $labAr
+        $artistOut, $titleOut = $titleOut, $artistOut
+        $arFg, $tiFg = $tiFg, $arFg
+    }
 
     if ($rawInput) {
         $rawInput = $rawInput.Replace([string]$SepChar, [string]$SepGlyph)
@@ -4908,9 +4920,9 @@ function Write-LiveOutputRows {
     Write-SegmentedLine 0 ($script:StatusTop + 1) $contentPart $UI_Color_SectionTitle $labIn $UI_Color_Input     $sepPart $UI_Color_FieldSeparator $rawInput $script:LastInFg $true
     Write-SegmentedLine 0 ($script:StatusTop + 2) $indentPart  $script:BaseFg          $labPx $script:LastPxFg    $sepPart $UI_Color_FieldSeparator $prefixOut $script:LastPxFg $true
 
-    Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $script:LastArtistFg    $sepPart $UI_Color_FieldSeparator $artistOut    $script:LastArtistFg    $true
+    Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $arFg                    $sepPart $UI_Color_FieldSeparator $artistOut    $arFg                    $true
     Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $script:LastConnectorFg $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $script:LastTitleFg     $sepPart $UI_Color_FieldSeparator $titleOut     $script:LastTitleFg     $true
+    Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $tiFg                    $sepPart $UI_Color_FieldSeparator $titleOut     $tiFg                    $true
 
     Write-SegmentedLine 0 ($script:StatusTop + 6) $indentPart $script:BaseFg $labRt $script:LastRtFg     $sepPart $UI_Color_FieldSeparator $rtText     $script:LastRtFg $true
     Write-SegmentedLine 0 ($script:StatusTop + 7) $indentPart $script:BaseFg $labRp $script:LastRpFg $sepPart $UI_Color_FieldSeparator $rtPlusText $script:LastRpFg $true
@@ -4946,6 +4958,13 @@ function Write-LiveOutputValues {
     $titleOut     = [string]$script:LastTitleShown
     $rtText       = [string]$script:LastRtTextShown
     $rtPlusText   = [string]$script:LastRtPlusTextShown
+    $arFg         = $script:LastArtistFg
+    $tiFg         = $script:LastTitleFg
+
+    if (Test-TitleFirstOrder) {
+        $artistOut, $titleOut = $titleOut, $artistOut
+        $arFg, $tiFg = $tiFg, $arFg
+    }
 
     if ($rawInput) {
         $rawInput = $rawInput.Replace([string]$SepChar, [string]$SepGlyph)
@@ -4954,9 +4973,9 @@ function Write-LiveOutputValues {
     Write-LiveOutputValue ($script:StatusTop + 1) $rawInput  $script:LastInFg
     Write-LiveOutputValue ($script:StatusTop + 2) $prefixOut $script:LastPxFg
 
-    Write-LiveOutputValue ($script:StatusTop + 3) $artistOut    $script:LastArtistFg
+    Write-LiveOutputValue ($script:StatusTop + 3) $artistOut    $arFg
     Write-LiveOutputValue ($script:StatusTop + 4) $connectorOut $script:LastConnectorFg
-    Write-LiveOutputValue ($script:StatusTop + 5) $titleOut     $script:LastTitleFg
+    Write-LiveOutputValue ($script:StatusTop + 5) $titleOut     $tiFg
 
     Write-LiveOutputValue ($script:StatusTop + 6) $rtText     $script:LastRtFg
     Write-LiveOutputValue ($script:StatusTop + 7) $rtPlusText $script:LastRpFg
@@ -5272,6 +5291,13 @@ function Write-HeaderFileRows {
     $titleWriteState     = $(if (Test-OutputWriteFailed 'title')     { $writeFailedText } else { '' })
     $rtWriteState        = $(if (Test-OutputWriteFailed 'RT')        { $writeFailedText } else { '' })
     $rtPlusWriteState    = $(if (Test-OutputWriteFailed 'RT+')       { $writeFailedText } else { '' })
+
+    if (Test-TitleFirstOrder) {
+        $labAr, $labTi = $labTi, $labAr
+        $artistFileName, $titleFileName = $titleFileName, $artistFileName
+        $fgAr, $fgTi = $fgTi, $fgAr
+        $artistWriteState, $titleWriteState = $titleWriteState, $artistWriteState
+    }
 
     Write-SegmentedLine 0 ($script:HeaderTop + 4) $filesPart  $UI_Color_SectionTitle $labIn $fgIn $sep $UI_Color_FieldSeparator $inFileName $fgIn $true
     Write-SegmentedLine 0 ($script:HeaderTop + 5) $indentPart $script:BaseFg $labPx $fgPx $sep $UI_Color_FieldSeparator $prefixFileName $fgPx $true $prefixWriteState $UI_Color_WarningText
@@ -8721,7 +8747,7 @@ function Compose-OutputsFromRaw([string]$raw) {
     if ($null -eq $parts) { return $empty }
 
     # Keep ready-made RT/RT+ compact and independent from the longer prefix/connector components.
-    # Only compact RT/RT+ follows the selected artist/title order; standalone component outputs stay fixed.
+    # Only compact RT/RT+ content follows the selected order; standalone file identities stay fixed.
     $script:OutJoin = " - "
     $visibleRt = Build-VisibleRtText $parts.Artist $parts.Title
     if ([string]::IsNullOrWhiteSpace($visibleRt)) { return $empty }
