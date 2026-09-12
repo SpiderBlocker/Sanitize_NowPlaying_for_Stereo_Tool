@@ -16,7 +16,7 @@ This project was created through iterative co-development with ChatGPT 5.2 / 5.5
 - Separate PREFIX, ARTIST, CONNECTOR and TITLE files for flexible composition in Stereo Tool or another RDS encoder
 - Independent adaptive 64-character processing for the ARTIST and TITLE component files
 - Adaptive trimming of combined RT/RT+ content to the RDS 64-character limit
-- Configurable artist/title order for the combined RT/RT+ outputs, plus multilingual or custom prefix text, connector text and playout delimiter
+- Configurable artist/title order for the combined RT/RT+ outputs and for the ARTIST/CONNECTOR/TITLE row order in the FILES and CONTENT blocks, plus multilingual or custom prefix text, connector text and playout delimiter
 - Optional Greek/Cyrillic transliteration and ASCII-safe mode
 - Redesigned color console UI separating LOCATION, FILES, CONTENT and LAST UPDATE information
 - Per-file output status, atomic writes, visible `WRITE FAILED` reporting and automatic retries
@@ -40,7 +40,7 @@ All output files are written as UTF-8 without BOM in the selected working direct
 
 The component files can be read separately when Stereo Tool should assemble the on-air text itself. The RT and RT+ files remain ready-made outputs for a simpler setup.
 
-The **Artist/title order** setting affects only the combined `COMPACT RT` and `COMPACT RT+` outputs. The separate ARTIST, CONNECTOR and TITLE component files keep their fixed semantic order and are not rearranged by this setting.
+The **Artist/title order** setting controls the combined `COMPACT RT` and `COMPACT RT+` outputs and also the presentation order of the ARTIST, CONNECTOR and TITLE rows in the console **FILES** and **CONTENT** blocks. The component files themselves keep fixed semantic identities: `artist.txt` always contains the artist, `connector.txt` the connector and `title.txt` the title.
 
 
 # Usage
@@ -74,7 +74,7 @@ Ensure that the field delimiter used between `%artist` and `%title` matches the 
 
     "%artist␟%title"
 
-Use the F10 menu to configure the working directory, prefix text, artist/title order for the combined RT/RT+ outputs, connector text, ASCII-safe mode, Greek/Cyrillic transliteration and playout delimiter.
+Use the F10 menu to configure the working directory, prefix text, artist/title order for the combined RT/RT+ outputs and matching console component-row order, connector text, ASCII-safe mode, Greek/Cyrillic transliteration and playout delimiter.
 
 Then configure Stereo Tool (or another RDS encoder) to read either the ready-made RT/RT+ files or the separate component files required by your workflow.
 
