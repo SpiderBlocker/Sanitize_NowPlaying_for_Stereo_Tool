@@ -9,7 +9,7 @@ This project was created through iterative co-development with ChatGPT 5.2 / 5.5
 
 # Features
 
-- Real-time monitoring of `nowplaying.txt` from playout software such as RadioBOSS
+- Low-overhead event-driven monitoring of `nowplaying.txt` from playout software such as RadioBOSS, with immediate wake-up on input changes
 - Intelligent artist/title cleanup (encoders, bitrates, countries, platform tags, duplicate information, etc.)
 - Smart handling of brackets, “feat.” and other common metadata noise
 - Ready-to-use compact RT and RT+ output files
@@ -18,7 +18,7 @@ This project was created through iterative co-development with ChatGPT 5.2 / 5.5
 - Adaptive trimming of combined RT/RT+ content to the RDS 64-character limit
 - Configurable artist/title order for the combined RT/RT+ outputs and for the ARTIST/CONNECTOR/TITLE row order in the FILES and CONTENT blocks, plus multilingual or custom prefix text, connector text and playout delimiter
 - Optional Greek/Cyrillic transliteration and ASCII-safe mode
-- Redesigned color console UI separating LOCATION, FILES, CONTENT and LAST UPDATE information
+- Redesigned color console UI separating LOCATION, FILES, CONTENT and LAST UPDATE information, with smooth live status updates around open F10 overlays
 - Per-file output status, atomic writes, visible `WRITE FAILED` reporting and automatic retries
 - Startup freshness handling and automatic output flush on exit to prevent stale RDS data
 - Persistent JSON configuration and single-instance protection
@@ -75,6 +75,8 @@ Ensure that the field delimiter used between `%artist` and `%title` matches the 
     "%artist␟%title"
 
 Use the F10 menu to configure the working directory, prefix text, artist/title order for the combined RT/RT+ outputs and matching console component-row order, connector text, ASCII-safe mode, Greek/Cyrillic transliteration and playout delimiter.
+
+Input monitoring remains active while F10 and its submenus are open. Visible status/content areas outside the active overlay continue to reflect input availability and current metadata state.
 
 Then configure Stereo Tool (or another RDS encoder) to read either the ready-made RT/RT+ files or the separate component files required by your workflow.
 

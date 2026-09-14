@@ -1,6 +1,6 @@
 ﻿#requires -version 5.1
 
-# sanitize-nowplaying.ps1 (Windows PowerShell 5.1 - Wait-Event watcher)
+# sanitize-nowplaying.ps1 (Windows PowerShell 5.1 - hybrid event-driven watcher)
 #
 # Input from Playout software:   %artist<sep>%title   (configurable; default separator U+241F "␟")
 #
@@ -117,7 +117,7 @@ public static class NativeExitFlush
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.1.5"
+$ScriptVersion = "2.1.6"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -816,8 +816,8 @@ $InputStableCheckMs       = 20
 $InputQuietStableMs       = 60  # Missing/unreadable/empty input gets a wider stability window.
 $InputStableMaxWaitMs     = 250 # Preserve the former debounce interval as a hard upper bound.
 
-# Main-loop idle poll cadence. The heartbeat itself redraws only when its visible value changes.
-$PollIntervalMs = 25
+# Main-loop UI/hotkey cadence. File input is event-driven and wakes the loop immediately.
+$PollIntervalMs = 100
 
 $ReadRetryCount   = 20
 $ReadRetryDelayMs = 50
@@ -1157,13 +1157,19 @@ function Restore-UiRegionSnapshot($snapshot) {
     } catch { return $false }
 }
 
-function Restore-UiAfterDialog($underlaySnapshot, [int]$left, [int]$top, [int]$width, [int]$height) {
+function Restore-UiAfterDialog($underlaySnapshot, [int]$left, [int]$top, [int]$width, [int]$height, [switch]$SkipLiveOutputRows) {
     $restored = $false
     if ($null -ne $underlaySnapshot) {
         try { $restored = Restore-UiRegionSnapshot $underlaySnapshot } catch { }
     }
     $script:UiLastDialogRestoredExact = $restored
-    if (-not $restored) { Restore-UiAfterMenu $left $top $width $height }
+    if (-not $restored) { Restore-UiAfterMenu $left $top $width $height -SkipLiveOutputRows:$SkipLiveOutputRows }
+
+    # A nested dialog snapshot may contain stale CONTENT cells from before an input-state change.
+    # Once that child closes, refresh only the cells now visible beside the parent overlay.
+    if ($script:UiOverlayActive -and $script:UiInited) {
+        try { Update-LiveOutputRowsDuringOverlayIfVisible } catch { }
+    }
 }
 
 function Get-UiAvailableHeight([int]$minimumHeight = 10) {
@@ -3275,7 +3281,7 @@ function Show-SettingsMenu {
     } finally {
         Pop-UiDialogGeometry $dialogToken
         $script:UiOverlayActive = $prevOverlay
-        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH } catch { }
+        try { Restore-UiAfterDialog $underlaySnapshot $x0 $y0 $menuW $menuH -SkipLiveOutputRows } catch { }
     }
 }
 
@@ -4293,7 +4299,7 @@ function Show-WorkDirMenu([switch]$MarkWizardDone) {
     }
 }
 
-function Restore-UiAfterMenu([int]$menuLeft, [int]$menuTop, [int]$menuWidth, [int]$menuHeight) {
+function Restore-UiAfterMenu([int]$menuLeft, [int]$menuTop, [int]$menuWidth, [int]$menuHeight, [switch]$SkipLiveOutputRows) {
     # Rebuild the current underlay, but clip every write to the exact former dialog rectangle.
     # While an overlay is active, Ensure-UiFresh() early-returns; temporarily release that guard.
     $prevOverlay            = $script:UiOverlayActive
@@ -4340,7 +4346,9 @@ function Restore-UiAfterMenu([int]$menuLeft, [int]$menuTop, [int]$menuWidth, [in
             }
 
             try { Draw-StatusFrame } catch { }
-            try { Write-LiveOutputRows } catch { }
+            if (-not $SkipLiveOutputRows) {
+                try { Write-LiveOutputRows } catch { }
+            }
 
             $lastCoveredRow  = $yEnd - 1
             $heartbeatRow    = $script:StatusTop + 9
@@ -4446,7 +4454,15 @@ function Invoke-OverlayDataIdleTick {
 
     if ($nowUtc -ge $script:NextOverlayMaintenancePollUtc) {
         $script:NextOverlayMaintenancePollUtc = $nowUtc.AddMilliseconds($UI_OverlayMaintenancePollMs)
-        try { Do-UpdateIfNeeded } catch { }
+
+        $watcherSignaled = $false
+        try {
+            if ($script:WatcherWake) { $watcherSignaled = $script:WatcherWake.Wait(0) }
+        } catch { }
+
+        try {
+            if ($watcherSignaled) { Process-WatcherInputChange } else { Do-UpdateIfNeeded }
+        } catch { }
         try { [void](Retry-PendingOutputsIfDue) } catch { }
     }
 
@@ -4522,15 +4538,11 @@ function Handle-Hotkeys {
 
     # Settings menu: F10 / Ctrl+S
     if ($k.Key -eq [ConsoleKey]::F10 -or ($k.Key -eq [ConsoleKey]::S -and ($k.Modifiers -band [ConsoleModifiers]::Control))) {
-        $orderBefore = $script:ArtistTitleOrder
         $changed = Show-SettingsMenu
 
         if ($changed) {
             try { Apply-WorkDirIfConfigured } catch { }
             try { Draw-Header } catch { }
-            if ($script:ArtistTitleOrder -ne $orderBefore) {
-                try { Write-LiveOutputRows } catch { }
-            }
             $script:RebuildWatcher = $true
         }
 
@@ -4538,6 +4550,10 @@ function Handle-Hotkeys {
         # stale setting tokens there. Re-render the legend unconditionally from live runtime state;
         # this remains independent of Do-Update and therefore preserves warning-state semantics.
         try { Render-SettingsAndLegend } catch { }
+
+        # The F10 underlay snapshot may predate metadata received while the menu was open.
+        # Refresh the CONTENT block once from the live cache after restoring the overlay.
+        try { Write-LiveOutputRows } catch { }
 
         # IMPORTANT: When the input is currently in a warning state (Expired / NotAvailable),
         # do NOT trigger an immediate Do-Update() on menu exit. That would:
@@ -4883,7 +4899,7 @@ function Test-OutputWriteFailed([string]$label) {
 
 function Write-LiveOutputRows {
     # Full CONTENT-block render. Used for initial layout, resize, overlay restoration and label-state changes.
-    # Derived-output labels follow their value state; separators remain static.
+    # Each complete row is committed through the native cursor-neutral path to avoid visible partial redraws.
     $contextWidth = 13
     $contentPart  = 'CONTENT'.PadRight($contextWidth)
     $indentPart   = (' ' * $contextWidth)
@@ -4917,18 +4933,151 @@ function Write-LiveOutputRows {
         $rawInput = $rawInput.Replace([string]$SepChar, [string]$SepGlyph)
     }
 
-    Write-SegmentedLine 0 ($script:StatusTop + 1) $contentPart $UI_Color_SectionTitle $labIn $UI_Color_Input     $sepPart $UI_Color_FieldSeparator $rawInput $script:LastInFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 2) $indentPart  $script:BaseFg          $labPx $script:LastPxFg    $sepPart $UI_Color_FieldSeparator $prefixOut $script:LastPxFg $true
+    $rows = @(
+        [pscustomobject]@{ A = $contentPart; AFg = $UI_Color_SectionTitle; B = $labIn; BFg = $UI_Color_Input;         C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $rawInput;     DFg = $script:LastInFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labPx; BFg = $script:LastPxFg;       C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $prefixOut;    DFg = $script:LastPxFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labAr; BFg = $arFg;                  C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $artistOut;    DFg = $arFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labCn; BFg = $script:LastConnectorFg; C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $connectorOut; DFg = $script:LastConnectorFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labTi; BFg = $tiFg;                  C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $titleOut;     DFg = $tiFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labRt; BFg = $script:LastRtFg;       C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $rtText;       DFg = $script:LastRtFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labRp; BFg = $script:LastRpFg;       C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $rtPlusText;   DFg = $script:LastRpFg }
+    )
 
-    Write-SegmentedLine 0 ($script:StatusTop + 3) $indentPart $script:BaseFg $labAr $arFg                    $sepPart $UI_Color_FieldSeparator $artistOut    $arFg                    $true
-    Write-SegmentedLine 0 ($script:StatusTop + 4) $indentPart $script:BaseFg $labCn $script:LastConnectorFg $sepPart $UI_Color_FieldSeparator $connectorOut $script:LastConnectorFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 5) $indentPart $script:BaseFg $labTi $tiFg                    $sepPart $UI_Color_FieldSeparator $titleOut     $tiFg                    $true
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $r = $rows[$i]
+        $segments = @(
+            @{ Text = [string]$r.A; Fg = [ConsoleColor]$r.AFg }
+            @{ Text = [string]$r.B; Fg = [ConsoleColor]$r.BFg }
+            @{ Text = [string]$r.C; Fg = [ConsoleColor]$r.CFg }
+            @{ Text = [string]$r.D; Fg = [ConsoleColor]$r.DFg }
+        )
+        [void](Write-AtSegments 0 ($script:StatusTop + 1 + $i) $segments $script:BaseFg $true -CursorNeutral)
+    }
 
-    Write-SegmentedLine 0 ($script:StatusTop + 6) $indentPart $script:BaseFg $labRt $script:LastRtFg     $sepPart $UI_Color_FieldSeparator $rtText     $script:LastRtFg $true
-    Write-SegmentedLine 0 ($script:StatusTop + 7) $indentPart $script:BaseFg $labRp $script:LastRpFg $sepPart $UI_Color_FieldSeparator $rtPlusText $script:LastRpFg $true
-    Write-At 0 ($script:StatusTop + 8) "" $script:BaseFg $true
+    # Clear the spacer row atomically as well.
+    [void](Write-AtSegments 0 ($script:StatusTop + 8) @() $script:BaseFg $true -CursorNeutral)
 
     $script:LiveOutputLayoutValid = $true
+}
+
+function Update-LiveOutputRowsDuringOverlayIfVisible {
+    if (-not $script:UiOverlayActive -or $null -eq $script:UiDialogStack -or $script:UiDialogStack.Count -le 0) { return }
+    try { if (-not (Initialize-UiRegionSnapshotNative)) { return } } catch { return }
+
+    $contextWidth = 13
+    $contentPart  = 'CONTENT'.PadRight($contextWidth)
+    $indentPart   = (' ' * $contextWidth)
+    $sepPart      = ': '
+
+    $labIn = Get-PaddedOutputLabel $UI_Label_Input
+    $labPx = Get-PaddedOutputLabel $UI_Label_Prefix
+    $labAr = Get-PaddedOutputLabel $UI_Label_Artist
+    $labCn = Get-PaddedOutputLabel $UI_Label_Connector
+    $labTi = Get-PaddedOutputLabel $UI_Label_Title
+    $labRt = Get-PaddedOutputLabel $UI_Label_CompactRt
+    $labRp = Get-PaddedOutputLabel $UI_Label_CompactRtPlus
+
+    $rawInput     = [string]$script:LastRawInputShown
+    $prefixOut    = [string]$script:LastPrefixOutShown
+    $artistOut    = [string]$script:LastArtistShown
+    $connectorOut = [string]$script:LastConnectorShown
+    $titleOut     = [string]$script:LastTitleShown
+    $rtText       = [string]$script:LastRtTextShown
+    $rtPlusText   = [string]$script:LastRtPlusTextShown
+    $arFg         = $script:LastArtistFg
+    $tiFg         = $script:LastTitleFg
+
+    if (Test-TitleFirstOrder) {
+        $labAr, $labTi = $labTi, $labAr
+        $artistOut, $titleOut = $titleOut, $artistOut
+        $arFg, $tiFg = $tiFg, $arFg
+    }
+
+    if ($rawInput) {
+        $rawInput = $rawInput.Replace([string]$SepChar, [string]$SepGlyph)
+    }
+
+    $rows = @(
+        [pscustomobject]@{ A = $contentPart; AFg = $UI_Color_SectionTitle; B = $labIn; BFg = $UI_Color_Input;          C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $rawInput;     DFg = $script:LastInFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labPx; BFg = $script:LastPxFg;        C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $prefixOut;    DFg = $script:LastPxFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labAr; BFg = $arFg;                   C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $artistOut;    DFg = $arFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labCn; BFg = $script:LastConnectorFg; C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $connectorOut; DFg = $script:LastConnectorFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labTi; BFg = $tiFg;                   C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $titleOut;     DFg = $tiFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labRt; BFg = $script:LastRtFg;        C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $rtText;       DFg = $script:LastRtFg }
+        [pscustomobject]@{ A = $indentPart;  AFg = $script:BaseFg;          B = $labRp; BFg = $script:LastRpFg;        C = $sepPart; CFg = $UI_Color_FieldSeparator; D = $rtPlusText;   DFg = $script:LastRpFg }
+    )
+
+    $w   = Get-UiWidth $UI_MinRenderWidth
+    $max = [Math]::Max(0, $w - 1)
+    if ($max -le 0) { return }
+
+    $bg = (([int]$script:BaseBg -band 0x0F) -shl 4)
+
+    for ($rowIndex = 0; $rowIndex -lt $rows.Count; $rowIndex++) {
+        $r = $rows[$rowIndex]
+        $y = $script:StatusTop + 1 + $rowIndex
+        $segments = @(
+            [pscustomobject]@{ Text = [string]$r.A; Fg = [ConsoleColor]$r.AFg }
+            [pscustomobject]@{ Text = [string]$r.B; Fg = [ConsoleColor]$r.BFg }
+            [pscustomobject]@{ Text = [string]$r.C; Fg = [ConsoleColor]$r.CFg }
+            [pscustomobject]@{ Text = [string]$r.D; Fg = [ConsoleColor]$r.DFg }
+        )
+
+        $plain = ''
+        foreach ($segment in $segments) { $plain += [string]$segment.Text }
+        $plain = (Pad-OrEllipsize $plain $max).PadRight($max)
+
+        $fgMap = New-Object 'int[]' $plain.Length
+        for ($i = 0; $i -lt $fgMap.Length; $i++) { $fgMap[$i] = [int]$script:BaseFg }
+
+        $pos = 0
+        foreach ($segment in $segments) {
+            if ($pos -ge $plain.Length) { break }
+            $segText = [string]$segment.Text
+            $length = [Math]::Min($segText.Length, $plain.Length - $pos)
+            for ($i = 0; $i -lt $length; $i++) { $fgMap[$pos + $i] = [int]$segment.Fg }
+            $pos += $length
+        }
+
+        $covered = New-Object 'bool[]' $plain.Length
+        $geometryOk = $true
+        foreach ($dialog in $script:UiDialogStack) {
+            try {
+                $dLeft   = [int]$dialog.X
+                $dTop    = [int]$dialog.Y
+                $dRight  = $dLeft + [Math]::Max(0, [int]$dialog.Width) - 1
+                $dBottom = $dTop  + [Math]::Max(0, [int]$dialog.Height) - 1
+                if ($y -lt $dTop -or $y -gt $dBottom) { continue }
+
+                $from = [Math]::Max(0, $dLeft)
+                $to   = [Math]::Min($plain.Length - 1, $dRight)
+                if ($from -le $to) {
+                    for ($i = $from; $i -le $to; $i++) { $covered[$i] = $true }
+                }
+            } catch {
+                $geometryOk = $false
+                break
+            }
+        }
+        if (-not $geometryOk) { continue }
+
+        try {
+            $snapshot = [Win.ConsoleRegionNative]::Capture(
+                $script:UiOffsetX, ($y + $script:UiOffsetY), $plain.Length, 1
+            )
+            if ($null -eq $snapshot) { continue }
+
+            for ($i = 0; $i -lt $plain.Length; $i++) {
+                if ($covered[$i]) { continue }
+                $cell             = $snapshot.Cells[$i]
+                $cell.UnicodeChar = $plain[$i]
+                $cell.Attributes  = [uint16]($bg -bor ($fgMap[$i] -band 0x0F))
+                $snapshot.Cells[$i] = $cell
+            }
+
+            [void]([Win.ConsoleRegionNative]::Restore($snapshot))
+        } catch { }
+    }
 }
 
 function Write-LiveOutputValue([int]$y, [string]$text, [ConsoleColor]$fg) {
@@ -5483,22 +5632,40 @@ function Render-SettingsAndLegend {
     # Blank line between the separator and the control legend
     Write-At 0 ($script:StatusTop + 11) "" $script:BaseFg $true
 
-    # Settings row (function hotkeys are shown left-to-right in F-key order)
-    Write-AtSegments 0 ($script:StatusTop + 12) $settingsSegments $script:BaseFg $true
-
-    # Exit key (Ctrl+C stops the main loop).
+    # Settings + exit hints share one row. Compose and commit it in one native write so
+    # the right-hand F10 / CTRL+C hints never disappear between intermediate redraws.
     $w2            = Get-UiWidth $UI_MinRenderWidth
     $exitHintLeft  = "F10 Settings"
     $exitHintRight = "CTRL+C Exit"
     $exitHint      = "$exitHintLeft   $exitHintRight"
     $xExit         = [Math]::Max(0, $w2 - $exitHint.Length - 1)
 
-    # Hotkey hints are low-priority UI chrome. Keep the words dimmed, but show the actual key chords in bright white.
-    Write-At $xExit ($script:StatusTop + 12) "F10" ($UI_Color_InputText)
-    Write-At ($xExit + 3) ($script:StatusTop + 12) " Settings" ($UI_Color_DimText)
-    Write-At ($xExit + 12) ($script:StatusTop + 12) "   " ($UI_Color_DimText)
-    Write-At ($xExit + 15) ($script:StatusTop + 12) "CTRL+C" ($UI_Color_InputText)
-    Write-At ($xExit + 21) ($script:StatusTop + 12) " Exit" ($UI_Color_DimText)
+    # Keep the right-hand hint anchored even if the window is unusually narrow:
+    # copy only as much of the left settings section as fits before xExit.
+    $legendSegments = @()
+    $remainingLeft = $xExit
+    foreach ($segment in $settingsSegments) {
+        if ($remainingLeft -le 0) { break }
+        $part = [string]$segment.Text
+        if ($part.Length -gt $remainingLeft) { $part = $part.Substring(0, $remainingLeft) }
+        if ($part.Length -gt 0) {
+            $legendSegments += @{ Text = $part; Fg = [ConsoleColor]$segment.Fg }
+            $remainingLeft -= $part.Length
+        }
+    }
+    if ($remainingLeft -gt 0) {
+        $legendSegments += @{ Text = (' ' * $remainingLeft); Fg = $script:BaseFg }
+    }
+
+    $legendSegments += @(
+        @{ Text = "F10";       Fg = $UI_Color_InputText }
+        @{ Text = " Settings"; Fg = $UI_Color_DimText }
+        @{ Text = "   ";       Fg = $UI_Color_DimText }
+        @{ Text = "CTRL+C";    Fg = $UI_Color_InputText }
+        @{ Text = " Exit";     Fg = $UI_Color_DimText }
+    )
+
+    [void](Write-AtSegments 0 ($script:StatusTop + 12) $legendSegments $script:BaseFg $true -CursorNeutral)
 }
 
 function Update-HeartbeatFields([switch]$CursorNeutral) {
@@ -5603,8 +5770,9 @@ function Update-Status(
     [string]$rtPlusText,
     [string]$inputState = "Normal"
 ) {
-    if ($script:UiOverlayActive) { return }
-    Ensure-UiFresh
+    # Keep the latest UI state cached while a menu overlays the main view; only suppress drawing.
+    $overlayActive = $script:UiOverlayActive
+    if (-not $overlayActive) { Ensure-UiFresh }
 
     $rawInput = ($rawInput -replace "^\uFEFF", "")
     $rawInput = [regex]::Replace($rawInput, "\s+", " ").Trim()
@@ -5670,12 +5838,16 @@ function Update-Status(
     $script:LastTitleFg     = $tiFg
     $script:LastRtFg        = $rtFg
     $script:LastRpFg        = $rpFg
+    $script:LastInputUiState = $inputState
+
+    if ($overlayActive) {
+        try { Update-LiveOutputRowsDuringOverlayIfVisible } catch { }
+        return
+    }
 
     try {
         if ($outputLabelColorsChanged) { Write-LiveOutputRows } else { Write-LiveOutputValues }
     } catch { }
-
-    $script:LastInputUiState = $inputState
 }
 
 # -------------------- Normalization helpers ----------------------------------
@@ -8518,22 +8690,77 @@ Apply-WorkDirIfConfigured
 # Arm the hard-exit flush only after this process owns the mutex and the final IO paths are known.
 try { [NativeExitFlush]::Update($script:PrefixFile, $script:ArtistFile, $script:ConnectorFile, $script:TitleFile, $script:OutFileRt, $script:OutFileRtPlus) } catch { }
 
-# -------------------- Watcher (Wait-Event) -----------------------------------
+# -------------------- Watcher (hybrid event-driven) ----------------------------
+
+function Initialize-WatcherWakeType {
+    if ("Win.FileWatcherWake" -as [type]) { return }
+
+    Add-Type -TypeDefinition @"
+namespace Win {
+    using System;
+    using System.IO;
+    using System.Threading;
+
+    public sealed class FileWatcherWake : IDisposable {
+        private readonly AutoResetEvent wake = new AutoResetEvent(false);
+        private FileSystemWatcher watcher;
+
+        private void Signal() {
+            try { wake.Set(); } catch (ObjectDisposedException) { }
+        }
+
+        private void OnFileEvent(object sender, FileSystemEventArgs e) {
+            Signal();
+        }
+
+        private void OnRenamedEvent(object sender, RenamedEventArgs e) {
+            Signal();
+        }
+
+        public void Attach(FileSystemWatcher value) {
+            Detach();
+            watcher = value;
+            if (watcher == null) return;
+
+            watcher.Changed += OnFileEvent;
+            watcher.Created += OnFileEvent;
+            watcher.Deleted += OnFileEvent;
+            watcher.Renamed += OnRenamedEvent;
+        }
+
+        public void Detach() {
+            if (watcher == null) return;
+
+            watcher.Changed -= OnFileEvent;
+            watcher.Created -= OnFileEvent;
+            watcher.Deleted -= OnFileEvent;
+            watcher.Renamed -= OnRenamedEvent;
+            watcher = null;
+        }
+
+        public bool Wait(int timeoutMilliseconds) {
+            return wake.WaitOne(timeoutMilliseconds);
+        }
+
+        public void Dispose() {
+            Detach();
+            wake.Dispose();
+        }
+    }
+}
+"@
+}
 
 function Initialize-Watcher {
     # (Re)create the FileSystemWatcher so changing WorkDir takes effect immediately.
     try {
+        if ($script:WatcherWake) {
+            try { $script:WatcherWake.Detach() } catch { }
+        }
         if ($script:fsw) {
             try { $script:fsw.EnableRaisingEvents = $false } catch { }
             try { $script:fsw.Dispose() } catch { }
         }
-    } catch { }
-
-    try {
-        foreach ($id in @("NP_Changed","NP_Created","NP_Renamed","NP_Deleted")) {
-            try { Unregister-Event -SourceIdentifier $id -Force -ErrorAction SilentlyContinue } catch { }
-        }
-        try { Get-Event | Remove-Event -ErrorAction SilentlyContinue } catch { }
     } catch { }
 
     $script:WatchedDir  = Split-Path -Parent $InFile
@@ -8541,18 +8768,21 @@ function Initialize-Watcher {
 
     if (-not (Ensure-Directory $script:WatchedDir)) { throw "Cannot create/access watcher directory: $script:WatchedDir" }
 
+    Initialize-WatcherWakeType
+    if (-not $script:WatcherWake) {
+        $script:WatcherWake = New-Object Win.FileWatcherWake
+    }
+
     $script:fsw                       = New-Object System.IO.FileSystemWatcher
     $script:fsw.Path                  = $script:WatchedDir
     $script:fsw.Filter                = $script:WatchedName
     $script:fsw.IncludeSubdirectories = $false
     $script:fsw.NotifyFilter          = [IO.NotifyFilters]'FileName, LastWrite, Size'
     $script:fsw.InternalBufferSize    = 65536
-    $script:fsw.EnableRaisingEvents   = $true
 
-    $null = Register-ObjectEvent -InputObject $script:fsw -EventName Changed -SourceIdentifier "NP_Changed"
-    $null = Register-ObjectEvent -InputObject $script:fsw -EventName Created -SourceIdentifier "NP_Created"
-    $null = Register-ObjectEvent -InputObject $script:fsw -EventName Renamed -SourceIdentifier "NP_Renamed"
-    $null = Register-ObjectEvent -InputObject $script:fsw -EventName Deleted -SourceIdentifier "NP_Deleted"
+    # The callback only sets an AutoResetEvent; all real processing remains on the main thread.
+    $script:WatcherWake.Attach($script:fsw)
+    $script:fsw.EnableRaisingEvents = $true
 }
 
 $null = Ensure-WorkDirOrFallback
@@ -8596,14 +8826,6 @@ function Get-InputUiState {
     }
 }
 
-function Should-HandleEvent($evt) {
-    $args = $evt.SourceEventArgs
-    if ($args.Name -ieq $script:WatchedName) { return $true }
-    if ($args -is [System.IO.RenamedEventArgs]) {
-        if ($args.OldName -ieq $script:WatchedName) { return $true }
-    }
-    return $false
-}
 
 function Get-EffectivePrefixOutput {
     $raw  = $(if ($script:AsciiSafeEnabled) { $script:PrefixTextAscii } else { $script:PrefixTextNative })
@@ -8836,6 +9058,23 @@ function Do-UpdateIfNeeded {
     }
 }
 
+function Process-WatcherInputChange {
+    # A watcher signal represents a real filesystem change even when timestamp and length happen to
+    # match the previous stamp. Stabilize first, coalesce any additional notifications, then process once.
+    if ($script:Stopping) { return }
+
+    Wait-ForInputStability $InFile
+
+    try {
+        while ($script:WatcherWake -and $script:WatcherWake.Wait(0)) { }
+    } catch { }
+
+    $stampNow = Get-InputStamp
+    if ($stampNow) { $script:LastStamp = $stampNow }
+
+    Do-Update
+}
+
 # Ctrl+C: stop the main loop.
 try {
     [Console]::CancelKeyPress += {
@@ -8899,58 +9138,34 @@ try {
             continue
         }
 
-        # Wait-Event only supports whole-second timeouts reliably in Windows PowerShell 5.1.
-        # Poll the already-queued events briefly instead, then sleep cooperatively for a subsecond heartbeat cadence.
-        $evt = Wait-Event -Timeout 0
+        # Sleep efficiently until either file input arrives or the next UI/heartbeat deadline is due.
+        $waitMs = Get-HeartbeatSleepMilliseconds $PollIntervalMs
+        $inputSignaled = $false
+        try {
+            $inputSignaled = $script:WatcherWake.Wait($waitMs)
+        } catch {
+            [System.Threading.Thread]::Sleep($waitMs)
+        }
 
         if ($script:Stopping) { break }
 
-        if ($null -eq $evt) {
-            $sleepMs = Get-HeartbeatSleepMilliseconds $PollIntervalMs
-            [System.Threading.Thread]::Sleep($sleepMs)
-            if ($script:Stopping) { break }
-
-            # Recheck after the cooperative sleep so a watcher event that arrived meanwhile is handled
-            # through the normal debounce path instead of first being picked up by the fallback stamp check.
-            $evt = Wait-Event -Timeout 0
-        }
-
-        if ($null -eq $evt) {
-            if (Handle-Hotkeys) { Do-Update }
-            try { Update-HeartbeatBar } catch { }
-
-            # Keep the previous one-second cadence for the fallback input-stamp check and output retry scheduler.
-            $nowUtc = [DateTime]::UtcNow
-            if ($nowUtc -ge $script:NextIdleMaintenanceUtc) {
-                $script:NextIdleMaintenanceUtc = $nowUtc.AddSeconds(1)
-                Do-UpdateIfNeeded
-                try { [void](Retry-PendingOutputsIfDue) } catch { }
-            }
-            continue
-        }
-
-        if (-not (Should-HandleEvent $evt)) {
-            Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
+        if ($inputSignaled) {
+            Process-WatcherInputChange
             try { Update-HeartbeatBar } catch { }
             try { [void](Retry-PendingOutputsIfDue) } catch { }
             continue
         }
 
-        Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
-
-        Wait-ForInputStability $InFile
-
-        while ($true) {
-            $evt2 = Wait-Event -Timeout 0
-            if ($null -eq $evt2) { break }
-            Remove-Event -EventIdentifier $evt2.EventIdentifier -ErrorAction SilentlyContinue
-        }
-
-        $stampNow = Get-InputStamp
-        if ($stampNow) { $script:LastStamp = $stampNow }
-
-        Do-Update
+        if (Handle-Hotkeys) { Do-Update }
         try { Update-HeartbeatBar } catch { }
+
+        # Preserve the one-second fallback stamp check and output retry scheduler.
+        $nowUtc = [DateTime]::UtcNow
+        if ($nowUtc -ge $script:NextIdleMaintenanceUtc) {
+            $script:NextIdleMaintenanceUtc = $nowUtc.AddSeconds(1)
+            Do-UpdateIfNeeded
+            try { [void](Retry-PendingOutputsIfDue) } catch { }
+        }
     }
 } finally {
     try { Stop-ConsoleCtrlABlocker } catch { }
@@ -8964,14 +9179,17 @@ try {
     try { [NativeExitFlush]::Update($null, $null, $null, $null, $null, $null) } catch { }
 
     try {
+        if ($script:WatcherWake) { $script:WatcherWake.Detach() }
+    } catch { }
+    try {
         if ($script:fsw) {
             $script:fsw.EnableRaisingEvents = $false
             $script:fsw.Dispose()
         }
     } catch { }
-
-    try { Get-EventSubscriber | Unregister-Event -Force -ErrorAction SilentlyContinue } catch { }
-    try { Get-Event | Remove-Event -ErrorAction SilentlyContinue } catch { }
+    try {
+        if ($script:WatcherWake) { $script:WatcherWake.Dispose() }
+    } catch { }
 
     try {
         if ($script:MutexHasHandle -and $script:Mutex) { $script:Mutex.ReleaseMutex() | Out-Null }
