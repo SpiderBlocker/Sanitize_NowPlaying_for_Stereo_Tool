@@ -111,13 +111,527 @@ public static class NativeExitFlush
         return false;
     }
 }
+
+// Precompile the watcher together with the exit handler so startup needs one C# compilation.
+// Console/UI native helpers are included below in this same compilation.
+namespace Win {
+    using System;
+    using System.IO;
+    using System.Threading;
+
+    public sealed class FileWatcherWake : IDisposable {
+        private readonly AutoResetEvent wake = new AutoResetEvent(false);
+        private FileSystemWatcher watcher;
+
+        private void Signal() {
+            try { wake.Set(); } catch (ObjectDisposedException) { }
+        }
+
+        private void OnFileEvent(object sender, FileSystemEventArgs e) {
+            Signal();
+        }
+
+        private void OnRenamedEvent(object sender, RenamedEventArgs e) {
+            Signal();
+        }
+
+        public void Attach(FileSystemWatcher value) {
+            Detach();
+            watcher = value;
+            if (watcher == null) return;
+
+            watcher.Changed += OnFileEvent;
+            watcher.Created += OnFileEvent;
+            watcher.Deleted += OnFileEvent;
+            watcher.Renamed += OnRenamedEvent;
+        }
+
+        public void Detach() {
+            if (watcher == null) return;
+
+            watcher.Changed -= OnFileEvent;
+            watcher.Created -= OnFileEvent;
+            watcher.Deleted -= OnFileEvent;
+            watcher.Renamed -= OnRenamedEvent;
+            watcher = null;
+        }
+
+        public bool Wait(int timeoutMilliseconds) {
+            return wake.WaitOne(timeoutMilliseconds);
+        }
+
+        public void Dispose() {
+            Detach();
+            wake.Dispose();
+        }
+    }
+}
+
+// Console/UI native helpers are compiled together to avoid repeated Add-Type compiler startup.
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleRegionNative {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct COORD {
+            public short X;
+            public short Y;
+            public COORD(short x, short y) { X = x; Y = y; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SMALL_RECT {
+            public short Left;
+            public short Top;
+            public short Right;
+            public short Bottom;
+        }
+
+        [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
+        public struct CHAR_INFO {
+            [FieldOffset(0)] public char UnicodeChar;
+            [FieldOffset(0)] public byte AsciiChar;
+            [FieldOffset(2)] public ushort Attributes;
+        }
+
+        public sealed class Snapshot {
+            public short X;
+            public short Y;
+            public short Width;
+            public short Height;
+            public CHAR_INFO[] Cells;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", EntryPoint = "ReadConsoleOutputW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ReadConsoleOutputW(
+            IntPtr hConsoleOutput,
+            [Out] CHAR_INFO[] lpBuffer,
+            COORD dwBufferSize,
+            COORD dwBufferCoord,
+            ref SMALL_RECT lpReadRegion);
+
+        [DllImport("kernel32.dll", EntryPoint = "WriteConsoleOutputW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WriteConsoleOutputW(
+            IntPtr hConsoleOutput,
+            [In] CHAR_INFO[] lpBuffer,
+            COORD dwBufferSize,
+            COORD dwBufferCoord,
+            ref SMALL_RECT lpWriteRegion);
+
+        private const int STD_OUTPUT_HANDLE = -11;
+
+        public static Snapshot Capture(int left, int top, int width, int height) {
+            if (left < 0 || top < 0 || width <= 0 || height <= 0 ||
+                left > short.MaxValue || top > short.MaxValue ||
+                width > short.MaxValue || height > short.MaxValue) return null;
+
+            IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return null;
+
+            CHAR_INFO[] cells = new CHAR_INFO[checked(width * height)];
+            SMALL_RECT rect = new SMALL_RECT {
+                Left = (short)left,
+                Top = (short)top,
+                Right = (short)(left + width - 1),
+                Bottom = (short)(top + height - 1)
+            };
+
+            if (!ReadConsoleOutputW(handle, cells,
+                    new COORD((short)width, (short)height),
+                    new COORD(0, 0), ref rect)) return null;
+
+            return new Snapshot {
+                X = (short)left,
+                Y = (short)top,
+                Width = (short)width,
+                Height = (short)height,
+                Cells = cells
+            };
+        }
+
+        public static bool Restore(Snapshot snapshot) {
+            if (snapshot == null || snapshot.Cells == null ||
+                snapshot.Width <= 0 || snapshot.Height <= 0) return false;
+
+            IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return false;
+
+            SMALL_RECT rect = new SMALL_RECT {
+                Left = snapshot.X,
+                Top = snapshot.Y,
+                Right = (short)(snapshot.X + snapshot.Width - 1),
+                Bottom = (short)(snapshot.Y + snapshot.Height - 1)
+            };
+
+            return WriteConsoleOutputW(handle, snapshot.Cells,
+                new COORD(snapshot.Width, snapshot.Height),
+                new COORD(0, 0), ref rect);
+        }
+    }
+}
+
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleModeNative {
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode);
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
+
+        public const int STD_INPUT_HANDLE = -10;
+        public const int ENABLE_QUICK_EDIT_MODE = 0x0040;
+        public const int ENABLE_EXTENDED_FLAGS  = 0x0080;
+        public const int ENABLE_MOUSE_INPUT    = 0x0010;
+    }
+}
+
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+    using System.Threading;
+
+    public static class ConsoleCtrlABlocker {
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN     = 0x0100;
+        private const int WM_KEYUP       = 0x0101;
+        private const int WM_SYSKEYDOWN  = 0x0104;
+        private const int WM_SYSKEYUP    = 0x0105;
+        private const int WM_QUIT        = 0x0012;
+        private const int VK_A           = 0x41;
+        private const int VK_LCONTROL    = 0xA2;
+        private const int VK_RCONTROL    = 0xA3;
+        private const int VK_LMENU       = 0xA4;
+        private const int VK_RMENU       = 0xA5;
+        private const uint GA_ROOT       = 2;
+
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSG {
+            public IntPtr hwnd;
+            public uint message;
+            public UIntPtr wParam;
+            public IntPtr lParam;
+            public uint time;
+            public POINT pt;
+            public uint lPrivate;
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetConsoleWindow();
+
+        [DllImport("kernel32.dll", CharSet=CharSet.Auto, SetLastError=true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern bool PostThreadMessage(uint idThread, uint Msg, UIntPtr wParam, IntPtr lParam);
+
+        private static readonly object Sync = new object();
+        private static readonly ManualResetEventSlim Ready = new ManualResetEventSlim(false);
+        private static LowLevelKeyboardProc HookProc = HookCallback;
+        private static Thread HookThread;
+        private static IntPtr HookHandle = IntPtr.Zero;
+        private static IntPtr ConsoleWindow = IntPtr.Zero;
+        private static uint HookThreadId;
+        private static int SuppressingA;
+
+        public static bool Start() {
+            lock (Sync) {
+                if (HookThread != null) {
+                    return HookHandle != IntPtr.Zero;
+                }
+
+                ConsoleWindow = GetConsoleWindow();
+                if (ConsoleWindow == IntPtr.Zero) {
+                    return false;
+                }
+
+                Ready.Reset();
+                HookThread = new Thread(HookThreadMain);
+                HookThread.IsBackground = true;
+                HookThread.Name = "Console Ctrl+A blocker";
+                HookThread.Start();
+            }
+
+            Ready.Wait(1500);
+            return HookHandle != IntPtr.Zero;
+        }
+
+        public static void Stop() {
+            Thread threadToJoin = null;
+
+            lock (Sync) {
+                threadToJoin = HookThread;
+                if (threadToJoin == null) {
+                    return;
+                }
+
+                if (HookThreadId != 0) {
+                    PostThreadMessage(HookThreadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+                }
+            }
+
+            try {
+                if (threadToJoin.IsAlive) {
+                    threadToJoin.Join(1000);
+                }
+            }
+            catch { }
+        }
+
+        private static void HookThreadMain() {
+            HookThreadId = GetCurrentThreadId();
+
+            try {
+                HookHandle = SetWindowsHookEx(WH_KEYBOARD_LL, HookProc, GetModuleHandle(null), 0);
+            }
+            catch {
+                HookHandle = IntPtr.Zero;
+            }
+            finally {
+                Ready.Set();
+            }
+
+            if (HookHandle != IntPtr.Zero) {
+                MSG msg;
+                while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+
+                try { UnhookWindowsHookEx(HookHandle); } catch { }
+            }
+
+            lock (Sync) {
+                HookHandle = IntPtr.Zero;
+                HookThreadId = 0;
+                HookThread = null;
+                SuppressingA = 0;
+            }
+        }
+
+        private static bool IsDown(int virtualKey) {
+            return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+        }
+
+        private static bool IsOwnConsoleForeground() {
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero || ConsoleWindow == IntPtr.Zero) {
+                return false;
+            }
+
+            IntPtr foregroundRoot = GetAncestor(foreground, GA_ROOT);
+            IntPtr consoleRoot = GetAncestor(ConsoleWindow, GA_ROOT);
+            return foreground == ConsoleWindow ||
+                   (foregroundRoot != IntPtr.Zero && foregroundRoot == consoleRoot);
+        }
+
+        private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
+            if (nCode >= 0) {
+                int message = wParam.ToInt32();
+                int virtualKey = Marshal.ReadInt32(lParam);
+
+                if (virtualKey == VK_A) {
+                    bool keyDown = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+                    bool keyUp   = message == WM_KEYUP   || message == WM_SYSKEYUP;
+
+                    if (keyDown) {
+                        bool controlDown = IsDown(VK_LCONTROL) || IsDown(VK_RCONTROL);
+                        bool altDown = IsDown(VK_LMENU) || IsDown(VK_RMENU);
+
+                        // Do not suppress AltGr combinations, which often appear as Ctrl+Alt.
+                        if (controlDown && !altDown && IsOwnConsoleForeground()) {
+                            Interlocked.Exchange(ref SuppressingA, 1);
+                            return new IntPtr(1);
+                        }
+                    }
+                    else if (keyUp && Interlocked.Exchange(ref SuppressingA, 0) != 0) {
+                        return new IntPtr(1);
+                    }
+                }
+            }
+
+            return CallNextHookEx(HookHandle, nCode, wParam, lParam);
+        }
+    }
+}
+
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleSelectionNative {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CONSOLE_SELECTION_INFO {
+            public uint dwFlags;
+            public COORD dwSelectionAnchor;
+            public SMALL_RECT srSelection;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct COORD { public short X; public short Y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SMALL_RECT { public short Left; public short Top; public short Right; public short Bottom; }
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern bool GetConsoleSelectionInfo(out CONSOLE_SELECTION_INFO lpConsoleSelectionInfo);
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern IntPtr GetConsoleWindow();
+
+        [DllImport("user32.dll", SetLastError=true)]
+        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        public const uint WM_KEYDOWN = 0x0100;
+        public const uint WM_KEYUP   = 0x0101;
+        public const int VK_ESCAPE   = 0x1B;
+
+        public const uint CONSOLE_SELECTION_IN_PROGRESS = 0x0001;
+        public const uint CONSOLE_SELECTION_NOT_EMPTY   = 0x0002;
+        public const uint CONSOLE_MOUSE_SELECTION      = 0x0004;
+        public const uint CONSOLE_MOUSE_DOWN           = 0x0008;
+        public const uint ANY_SELECTION_FLAG           = 0x000F;
+    }
+}
+
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleWindowNative {
+        public const int GWL_STYLE = -16;
+
+        public const int WS_MAXIMIZEBOX = 0x00010000;
+        public const int WS_THICKFRAME  = 0x00040000; // WS_SIZEBOX / resizable border
+
+        public const uint SWP_NOSIZE       = 0x0001;
+        public const uint SWP_NOMOVE       = 0x0002;
+        public const uint SWP_NOZORDER     = 0x0004;
+        public const uint SWP_FRAMECHANGED = 0x0020;
+
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr GetConsoleWindow();
+
+        [DllImport("user32.dll", EntryPoint="GetWindowLongPtr", SetLastError=true)]
+        private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint="SetWindowLongPtr", SetLastError=true)]
+        private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+        [DllImport("user32.dll", EntryPoint="GetWindowLong", SetLastError=true)]
+        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint="SetWindowLong", SetLastError=true)]
+        private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int X, int Y, int cx, int cy, uint uFlags);
+
+        public static int GetStyle(IntPtr hwnd) {
+            if (IntPtr.Size == 8) return (int)GetWindowLongPtr64(hwnd, GWL_STYLE);
+            return GetWindowLong32(hwnd, GWL_STYLE);
+        }
+
+        public static void SetStyle(IntPtr hwnd, int style) {
+            if (IntPtr.Size == 8) SetWindowLongPtr64(hwnd, GWL_STYLE, (IntPtr)style);
+            else SetWindowLong32(hwnd, GWL_STYLE, style);
+        }
+
+        public static void RefreshFrame(IntPtr hwnd) {
+            SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        }
+    }
+}
+
+namespace Win {
+    using System;
+    using System.Runtime.InteropServices;
+
+    public static class ConsoleFontNative {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct COORD { public short X; public short Y; }
+
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+        public struct CONSOLE_FONT_INFOEX {
+            public uint cbSize;
+            public uint nFont;
+            public COORD dwFontSize;
+            public int FontFamily;
+            public int FontWeight;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)]
+            public string FaceName;
+        }
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+        public static extern bool GetCurrentConsoleFontEx(
+            IntPtr hConsoleOutput,
+            bool bMaximumWindow,
+            ref CONSOLE_FONT_INFOEX lpConsoleCurrentFontEx
+        );
+
+        [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+        public static extern bool SetCurrentConsoleFontEx(
+            IntPtr hConsoleOutput,
+            bool bMaximumWindow,
+            ref CONSOLE_FONT_INFOEX lpConsoleCurrentFontEx
+        );
+
+        public const int STD_OUTPUT_HANDLE = -11;
+    }
+}
+
 "@ -ErrorAction Stop
 } catch { }
 
 try { [NativeExitFlush]::Install() } catch { }
 
 $ScriptTitle   = "Sanitize NowPlaying for Stereo Tool"
-$ScriptVersion = "2.1.6"
+$ScriptVersion = "2.1.7"
 
 # -------------------------------------------------------------------------------------------------
 # UI configuration
@@ -449,12 +963,12 @@ function Show-WorkDirWizardIfNeeded {
     $done = $false
     try { $done = [bool]$script:Settings.WorkDirWizardDone } catch { }
 
-    # Ensure the fixed console layout is applied even before the first full UI render.
-    # This matters on first run, where the WorkDir wizard appears before the main UI is initialized.
-    try { Ensure-MinConsoleLayout } catch { }
-
+    # Normal subsequent starts return before touching the console layout.
     if ($done -and $dir -and (Test-Path -LiteralPath $dir -PathType Container)) { return $true }
     if ($done -and (-not $dir))                                                { return $true }
+
+    # First run (or an invalid saved directory) needs the fixed layout before the wizard is drawn.
+    try { Ensure-MinConsoleLayout } catch { }
 
     $result = Show-WorkDirMenu -MarkWizardDone
     return ($null -ne $result)
@@ -1014,117 +1528,7 @@ function Initialize-UiRegionSnapshotNative {
     # RawUI.GetBufferContents() can expose Unicode box-drawing cells as NUL on some
     # PowerShell/conhost combinations. Use the Unicode Win32 console-buffer API instead.
     try {
-        if (-not ("Win.ConsoleRegionNative" -as [type])) {
-            Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.Runtime.InteropServices;
-
-    public static class ConsoleRegionNative {
-        [StructLayout(LayoutKind.Sequential)]
-        public struct COORD {
-            public short X;
-            public short Y;
-            public COORD(short x, short y) { X = x; Y = y; }
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct SMALL_RECT {
-            public short Left;
-            public short Top;
-            public short Right;
-            public short Bottom;
-        }
-
-        [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
-        public struct CHAR_INFO {
-            [FieldOffset(0)] public char UnicodeChar;
-            [FieldOffset(0)] public byte AsciiChar;
-            [FieldOffset(2)] public ushort Attributes;
-        }
-
-        public sealed class Snapshot {
-            public short X;
-            public short Y;
-            public short Width;
-            public short Height;
-            public CHAR_INFO[] Cells;
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr GetStdHandle(int nStdHandle);
-
-        [DllImport("kernel32.dll", EntryPoint = "ReadConsoleOutputW", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool ReadConsoleOutputW(
-            IntPtr hConsoleOutput,
-            [Out] CHAR_INFO[] lpBuffer,
-            COORD dwBufferSize,
-            COORD dwBufferCoord,
-            ref SMALL_RECT lpReadRegion);
-
-        [DllImport("kernel32.dll", EntryPoint = "WriteConsoleOutputW", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool WriteConsoleOutputW(
-            IntPtr hConsoleOutput,
-            [In] CHAR_INFO[] lpBuffer,
-            COORD dwBufferSize,
-            COORD dwBufferCoord,
-            ref SMALL_RECT lpWriteRegion);
-
-        private const int STD_OUTPUT_HANDLE = -11;
-
-        public static Snapshot Capture(int left, int top, int width, int height) {
-            if (left < 0 || top < 0 || width <= 0 || height <= 0 ||
-                left > short.MaxValue || top > short.MaxValue ||
-                width > short.MaxValue || height > short.MaxValue) return null;
-
-            IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
-            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return null;
-
-            CHAR_INFO[] cells = new CHAR_INFO[checked(width * height)];
-            SMALL_RECT rect = new SMALL_RECT {
-                Left = (short)left,
-                Top = (short)top,
-                Right = (short)(left + width - 1),
-                Bottom = (short)(top + height - 1)
-            };
-
-            if (!ReadConsoleOutputW(handle, cells,
-                    new COORD((short)width, (short)height),
-                    new COORD(0, 0), ref rect)) return null;
-
-            return new Snapshot {
-                X = (short)left,
-                Y = (short)top,
-                Width = (short)width,
-                Height = (short)height,
-                Cells = cells
-            };
-        }
-
-        public static bool Restore(Snapshot snapshot) {
-            if (snapshot == null || snapshot.Cells == null ||
-                snapshot.Width <= 0 || snapshot.Height <= 0) return false;
-
-            IntPtr handle = GetStdHandle(STD_OUTPUT_HANDLE);
-            if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return false;
-
-            SMALL_RECT rect = new SMALL_RECT {
-                Left = snapshot.X,
-                Top = snapshot.Y,
-                Right = (short)(snapshot.X + snapshot.Width - 1),
-                Bottom = (short)(snapshot.Y + snapshot.Height - 1)
-            };
-
-            return WriteConsoleOutputW(handle, snapshot.Cells,
-                new COORD(snapshot.Width, snapshot.Height),
-                new COORD(0, 0), ref rect);
-        }
-    }
-}
-"@
-        }
+        if (-not ("Win.ConsoleRegionNative" -as [type])) { return $false }
         return $true
     } catch { return $false }
 }
@@ -1376,30 +1780,7 @@ $HealthRedAtSec = 900  # 15 minutes to full red
 
 function Disable-ConsoleQuickEdit {
     try {
-        if (-not ("Win.ConsoleModeNative" -as [type])) {
-            Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.Runtime.InteropServices;
-
-    public static class ConsoleModeNative {
-        [DllImport("kernel32.dll", SetLastError=true)]
-        public static extern IntPtr GetStdHandle(int nStdHandle);
-
-        [DllImport("kernel32.dll", SetLastError=true)]
-        public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode);
-
-        [DllImport("kernel32.dll", SetLastError=true)]
-        public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
-
-        public const int STD_INPUT_HANDLE = -10;
-        public const int ENABLE_QUICK_EDIT_MODE = 0x0040;
-        public const int ENABLE_EXTENDED_FLAGS  = 0x0080;
-        public const int ENABLE_MOUSE_INPUT    = 0x0010;
-    }
-}
-"@
-        }
+        if (-not ("Win.ConsoleModeNative" -as [type])) { return }
 
         $h = [Win.ConsoleModeNative]::GetStdHandle([Win.ConsoleModeNative]::STD_INPUT_HANDLE)
         if ($h -eq [IntPtr]::Zero) { return }
@@ -1421,207 +1802,7 @@ function Install-ConsoleCtrlABlocker {
     # to suppress only Ctrl+A, and only while this console window is in the foreground.
     # No keystrokes are logged or retained; every other key is passed through unchanged.
     try {
-        if (-not ("Win.ConsoleCtrlABlocker" -as [type])) {
-            Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.Runtime.InteropServices;
-    using System.Threading;
-
-    public static class ConsoleCtrlABlocker {
-        private const int WH_KEYBOARD_LL = 13;
-        private const int WM_KEYDOWN     = 0x0100;
-        private const int WM_KEYUP       = 0x0101;
-        private const int WM_SYSKEYDOWN  = 0x0104;
-        private const int WM_SYSKEYUP    = 0x0105;
-        private const int WM_QUIT        = 0x0012;
-        private const int VK_A           = 0x41;
-        private const int VK_LCONTROL    = 0xA2;
-        private const int VK_RCONTROL    = 0xA3;
-        private const int VK_LMENU       = 0xA4;
-        private const int VK_RMENU       = 0xA5;
-        private const uint GA_ROOT       = 2;
-
-        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct POINT {
-            public int X;
-            public int Y;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct MSG {
-            public IntPtr hwnd;
-            public uint message;
-            public UIntPtr wParam;
-            public IntPtr lParam;
-            public uint time;
-            public POINT pt;
-            public uint lPrivate;
-        }
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr GetConsoleWindow();
-
-        [DllImport("kernel32.dll", CharSet=CharSet.Auto, SetLastError=true)]
-        private static extern IntPtr GetModuleHandle(string lpModuleName);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentThreadId();
-
-        [DllImport("user32.dll", SetLastError=true)]
-        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
-
-        [DllImport("user32.dll", SetLastError=true)]
-        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern short GetAsyncKeyState(int vKey);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
-
-        [DllImport("user32.dll", SetLastError=true)]
-        private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
-
-        [DllImport("user32.dll", SetLastError=true)]
-        private static extern bool PostThreadMessage(uint idThread, uint Msg, UIntPtr wParam, IntPtr lParam);
-
-        private static readonly object Sync = new object();
-        private static readonly ManualResetEventSlim Ready = new ManualResetEventSlim(false);
-        private static LowLevelKeyboardProc HookProc = HookCallback;
-        private static Thread HookThread;
-        private static IntPtr HookHandle = IntPtr.Zero;
-        private static IntPtr ConsoleWindow = IntPtr.Zero;
-        private static uint HookThreadId;
-        private static int SuppressingA;
-
-        public static bool Start() {
-            lock (Sync) {
-                if (HookThread != null) {
-                    return HookHandle != IntPtr.Zero;
-                }
-
-                ConsoleWindow = GetConsoleWindow();
-                if (ConsoleWindow == IntPtr.Zero) {
-                    return false;
-                }
-
-                Ready.Reset();
-                HookThread = new Thread(HookThreadMain);
-                HookThread.IsBackground = true;
-                HookThread.Name = "Console Ctrl+A blocker";
-                HookThread.Start();
-            }
-
-            Ready.Wait(1500);
-            return HookHandle != IntPtr.Zero;
-        }
-
-        public static void Stop() {
-            Thread threadToJoin = null;
-
-            lock (Sync) {
-                threadToJoin = HookThread;
-                if (threadToJoin == null) {
-                    return;
-                }
-
-                if (HookThreadId != 0) {
-                    PostThreadMessage(HookThreadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
-                }
-            }
-
-            try {
-                if (threadToJoin.IsAlive) {
-                    threadToJoin.Join(1000);
-                }
-            }
-            catch { }
-        }
-
-        private static void HookThreadMain() {
-            HookThreadId = GetCurrentThreadId();
-
-            try {
-                HookHandle = SetWindowsHookEx(WH_KEYBOARD_LL, HookProc, GetModuleHandle(null), 0);
-            }
-            catch {
-                HookHandle = IntPtr.Zero;
-            }
-            finally {
-                Ready.Set();
-            }
-
-            if (HookHandle != IntPtr.Zero) {
-                MSG msg;
-                while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
-
-                try { UnhookWindowsHookEx(HookHandle); } catch { }
-            }
-
-            lock (Sync) {
-                HookHandle = IntPtr.Zero;
-                HookThreadId = 0;
-                HookThread = null;
-                SuppressingA = 0;
-            }
-        }
-
-        private static bool IsDown(int virtualKey) {
-            return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
-        }
-
-        private static bool IsOwnConsoleForeground() {
-            IntPtr foreground = GetForegroundWindow();
-            if (foreground == IntPtr.Zero || ConsoleWindow == IntPtr.Zero) {
-                return false;
-            }
-
-            IntPtr foregroundRoot = GetAncestor(foreground, GA_ROOT);
-            IntPtr consoleRoot = GetAncestor(ConsoleWindow, GA_ROOT);
-            return foreground == ConsoleWindow ||
-                   (foregroundRoot != IntPtr.Zero && foregroundRoot == consoleRoot);
-        }
-
-        private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
-            if (nCode >= 0) {
-                int message = wParam.ToInt32();
-                int virtualKey = Marshal.ReadInt32(lParam);
-
-                if (virtualKey == VK_A) {
-                    bool keyDown = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
-                    bool keyUp   = message == WM_KEYUP   || message == WM_SYSKEYUP;
-
-                    if (keyDown) {
-                        bool controlDown = IsDown(VK_LCONTROL) || IsDown(VK_RCONTROL);
-                        bool altDown = IsDown(VK_LMENU) || IsDown(VK_RMENU);
-
-                        // Do not suppress AltGr combinations, which often appear as Ctrl+Alt.
-                        if (controlDown && !altDown && IsOwnConsoleForeground()) {
-                            Interlocked.Exchange(ref SuppressingA, 1);
-                            return new IntPtr(1);
-                        }
-                    }
-                    else if (keyUp && Interlocked.Exchange(ref SuppressingA, 0) != 0) {
-                        return new IntPtr(1);
-                    }
-                }
-            }
-
-            return CallNextHookEx(HookHandle, nCode, wParam, lParam);
-        }
-    }
-}
-"@
-        }
+        if (-not ("Win.ConsoleCtrlABlocker" -as [type])) { return $false }
 
         return [Win.ConsoleCtrlABlocker]::Start()
     } catch {
@@ -1642,48 +1823,7 @@ function Clear-ConsoleSelectionIfActive {
     # selection anchor. Cancelling it also prevents a stray block/caret from remaining visible.
     $selectionWasActive = $false
     try {
-        if (-not ("Win.ConsoleSelectionNative" -as [type])) {
-            Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.Runtime.InteropServices;
-
-    public static class ConsoleSelectionNative {
-        [StructLayout(LayoutKind.Sequential)]
-        public struct CONSOLE_SELECTION_INFO {
-            public uint dwFlags;
-            public COORD dwSelectionAnchor;
-            public SMALL_RECT srSelection;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct COORD { public short X; public short Y; }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct SMALL_RECT { public short Left; public short Top; public short Right; public short Bottom; }
-
-        [DllImport("kernel32.dll", SetLastError=true)]
-        public static extern bool GetConsoleSelectionInfo(out CONSOLE_SELECTION_INFO lpConsoleSelectionInfo);
-
-        [DllImport("kernel32.dll", SetLastError=true)]
-        public static extern IntPtr GetConsoleWindow();
-
-        [DllImport("user32.dll", SetLastError=true)]
-        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-
-        public const uint WM_KEYDOWN = 0x0100;
-        public const uint WM_KEYUP   = 0x0101;
-        public const int VK_ESCAPE   = 0x1B;
-
-        public const uint CONSOLE_SELECTION_IN_PROGRESS = 0x0001;
-        public const uint CONSOLE_SELECTION_NOT_EMPTY   = 0x0002;
-        public const uint CONSOLE_MOUSE_SELECTION      = 0x0004;
-        public const uint CONSOLE_MOUSE_DOWN           = 0x0008;
-        public const uint ANY_SELECTION_FLAG           = 0x000F;
-    }
-}
-"@
-        }
+        if (-not ("Win.ConsoleSelectionNative" -as [type])) { return $false }
 
         $sel = New-Object Win.ConsoleSelectionNative+CONSOLE_SELECTION_INFO
         if (-not [Win.ConsoleSelectionNative]::GetConsoleSelectionInfo([ref]$sel)) { return $false }
@@ -1717,60 +1857,7 @@ function Disable-ConsoleResizeControls {
     try {
         if ([bool]$env:WT_SESSION) { return }  # Windows Terminal (or compatible host)
 
-        if (-not ("Win.ConsoleWindowNative" -as [type])) {
-            Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.Runtime.InteropServices;
-
-    public static class ConsoleWindowNative {
-        public const int GWL_STYLE = -16;
-
-        public const int WS_MAXIMIZEBOX = 0x00010000;
-        public const int WS_THICKFRAME  = 0x00040000; // WS_SIZEBOX / resizable border
-
-        public const uint SWP_NOSIZE       = 0x0001;
-        public const uint SWP_NOMOVE       = 0x0002;
-        public const uint SWP_NOZORDER     = 0x0004;
-        public const uint SWP_FRAMECHANGED = 0x0020;
-
-        [DllImport("kernel32.dll")]
-        public static extern IntPtr GetConsoleWindow();
-
-        [DllImport("user32.dll", EntryPoint="GetWindowLongPtr", SetLastError=true)]
-        private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll", EntryPoint="SetWindowLongPtr", SetLastError=true)]
-        private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-
-        [DllImport("user32.dll", EntryPoint="GetWindowLong", SetLastError=true)]
-        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll", EntryPoint="SetWindowLong", SetLastError=true)]
-        private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
-
-        [DllImport("user32.dll", SetLastError=true)]
-        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
-            int X, int Y, int cx, int cy, uint uFlags);
-
-        public static int GetStyle(IntPtr hwnd) {
-            if (IntPtr.Size == 8) return (int)GetWindowLongPtr64(hwnd, GWL_STYLE);
-            return GetWindowLong32(hwnd, GWL_STYLE);
-        }
-
-        public static void SetStyle(IntPtr hwnd, int style) {
-            if (IntPtr.Size == 8) SetWindowLongPtr64(hwnd, GWL_STYLE, (IntPtr)style);
-            else SetWindowLong32(hwnd, GWL_STYLE, style);
-        }
-
-        public static void RefreshFrame(IntPtr hwnd) {
-            SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-        }
-    }
-}
-"@
-        }
+        if (-not ("Win.ConsoleWindowNative" -as [type])) { return }
 
         $hwnd = [Win.ConsoleWindowNative]::GetConsoleWindow()
         if ($hwnd -eq [IntPtr]::Zero) { return }
@@ -1839,49 +1926,7 @@ function Set-ConsoleFontBestEffort {
     )
 
     try {
-        if (-not ("Win.ConsoleFontNative" -as [type])) {
-            Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.Runtime.InteropServices;
-
-    public static class ConsoleFontNative {
-        [StructLayout(LayoutKind.Sequential)]
-        public struct COORD { public short X; public short Y; }
-
-        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-        public struct CONSOLE_FONT_INFOEX {
-            public uint cbSize;
-            public uint nFont;
-            public COORD dwFontSize;
-            public int FontFamily;
-            public int FontWeight;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)]
-            public string FaceName;
-        }
-
-        [DllImport("kernel32.dll", SetLastError=true)]
-        public static extern IntPtr GetStdHandle(int nStdHandle);
-
-        [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-        public static extern bool GetCurrentConsoleFontEx(
-            IntPtr hConsoleOutput,
-            bool bMaximumWindow,
-            ref CONSOLE_FONT_INFOEX lpConsoleCurrentFontEx
-        );
-
-        [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-        public static extern bool SetCurrentConsoleFontEx(
-            IntPtr hConsoleOutput,
-            bool bMaximumWindow,
-            ref CONSOLE_FONT_INFOEX lpConsoleCurrentFontEx
-        );
-
-        public const int STD_OUTPUT_HANDLE = -11;
-    }
-}
-"@
-        }
+        if (-not ("Win.ConsoleFontNative" -as [type])) { return }
 
         $hOut = [Win.ConsoleFontNative]::GetStdHandle([Win.ConsoleFontNative]::STD_OUTPUT_HANDLE)
         if ($hOut -eq [IntPtr]::Zero) { return }
@@ -1890,6 +1935,18 @@ namespace Win {
         $cfi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($cfi)
 
         if (-not [Win.ConsoleFontNative]::GetCurrentConsoleFontEx($hOut, $false, [ref]$cfi)) { return }
+
+        # Avoid a costly conhost font refresh when the current font is already acceptable.
+        $currentFace       = "$($cfi.FaceName)".Trim()
+        $currentHeight     = [int]$cfi.dwFontSize.Y
+        $fontAlreadyUsable = $false
+        foreach ($name in $PreferredFonts) {
+            if (-not [string]::IsNullOrWhiteSpace($name) -and $currentFace -ieq $name.Trim()) {
+                $fontAlreadyUsable = $true
+                break
+            }
+        }
+        if ($fontAlreadyUsable -and ($FontHeight -le 0 -or $currentHeight -eq $FontHeight)) { return }
 
         try {
             if ($FontHeight -gt 0 -and $FontHeight -lt 100) { $cfi.dwFontSize.Y = [int16]$FontHeight }
@@ -1905,25 +1962,26 @@ namespace Win {
         }
     } catch { }
 }
-Disable-ConsoleQuickEdit
-
-# Suppress conhost's built-in Ctrl+A / Select All action before it can affect the UI.
-# The blocker is scoped to this console window and is removed again during shutdown.
-[void](Install-ConsoleCtrlABlocker)
-
-# Font changing via SetCurrentConsoleFontEx is known to be unstable on some console hosts.
-# Only attempt it in classic conhost sessions (best-effort).
+# QuickEdit, Ctrl+A suppression, resize locking and font tweaks are classic-conhost fixes.
+# Windows Terminal uses ConPTY and does not need these; skipping them avoids needless startup work.
 try {
     $isWindowsTerminal = [bool]$env:WT_SESSION
-    if (-not $isWindowsTerminal -and $EnableConsoleResizeLock) {
-        Disable-ConsoleResizeControls
-    }
-    if (-not $isWindowsTerminal -and $EnableConsoleFontTweak) {
-        Set-ConsoleFontBestEffort -PreferredFonts $UI_ConsolePreferredFonts -FontHeight $UI_ConsoleFontHeight
+    if (-not $isWindowsTerminal) {
+        Disable-ConsoleQuickEdit
+
+        # Suppress conhost's built-in Ctrl+A / Select All action before it can affect the UI.
+        # The blocker is scoped to this console window and is removed again during shutdown.
+        [void](Install-ConsoleCtrlABlocker)
+
+        if ($EnableConsoleResizeLock) {
+            Disable-ConsoleResizeControls
+        }
+        if ($EnableConsoleFontTweak) {
+            Set-ConsoleFontBestEffort -PreferredFonts $UI_ConsolePreferredFonts -FontHeight $UI_ConsoleFontHeight
+        }
     }
 } catch { }
 
-try { Clear-Host } catch { }
 try { [Console]::CursorVisible = $false } catch { }
 
 $script:BaseFg = $UI_Color_InputText
@@ -5176,8 +5234,8 @@ function Ensure-MinConsoleLayout {
     # Goal: stable UI layout and no scrollbars (buffer == window).
     try {
         [Console]::BackgroundColor = $script:BaseBg
-        Clear-Host
-    } catch { }
+        [Console]::Clear()
+    } catch { try { Clear-Host } catch { } }
 
     try {
         if ($FixedConsoleWidth  -lt $UI_MinConsoleWidth) { $FixedConsoleWidth  = $UI_MinConsoleWidth }
@@ -5370,7 +5428,9 @@ function Apply-PostInitConsoleTweaks {
     # Re-apply our preferred modes after the first full UI render.
     if ($script:PostInitConsoleTweaksApplied) { return }
 
-    try { Disable-ConsoleQuickEdit } catch { }
+    if (-not $env:WT_SESSION) {
+        try { Disable-ConsoleQuickEdit } catch { }
+    }
 
     # Best-effort: in classic conhost, remove scrollback so the scrollbar is gone.
     if ($EnableHardScrollLock -and -not $script:HardScrollLockApplied) {
@@ -6439,24 +6499,15 @@ function Get-CountryAliases() {
 function Get-CountryPrefixRegex() {
     if ($script:_CountryPrefixRegex) { return $script:_CountryPrefixRegex }
 
-    $names = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
-    try {
-        foreach ($c in [System.Globalization.CultureInfo]::GetCultures([System.Globalization.CultureTypes]::SpecificCultures)) {
-            try {
-                $ri = New-Object System.Globalization.RegionInfo($c.Name)
-                if ($ri -and -not [string]::IsNullOrWhiteSpace($ri.EnglishName)) {
-                    [void]$names.Add($ri.EnglishName.Trim())
-                }
-                if ($ri -and -not [string]::IsNullOrWhiteSpace($ri.TwoLetterISORegionName)) {
-                    [void]$names.Add($ri.TwoLetterISORegionName.Trim())
-                }
-            } catch { }
-        }
-    } catch { }
+    # Reuse the shared RegionInfo-derived cache instead of enumerating all cultures a second time.
+    Ensure-CountryData
 
-    # Add a few common legacy/alternate English country names that RegionInfo may not emit on this system.
-    foreach ($alias in (Get-CountryAliases)) {
-        if (-not [string]::IsNullOrWhiteSpace($alias)) { [void]$names.Add($alias.Trim()) }
+    $names = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($script:_CountryNameSet)) {
+        if (-not [string]::IsNullOrWhiteSpace($n)) { [void]$names.Add($n.Trim()) }
+    }
+    foreach ($cc in @($script:_CountryIso2Set)) {
+        if (-not [string]::IsNullOrWhiteSpace($cc)) { [void]$names.Add($cc.Trim()) }
     }
 
     foreach ($n in @("Netherlands","United States","United Kingdom","Czech Republic","Philippines","United Arab Emirates")) {
@@ -8692,65 +8743,6 @@ try { [NativeExitFlush]::Update($script:PrefixFile, $script:ArtistFile, $script:
 
 # -------------------- Watcher (hybrid event-driven) ----------------------------
 
-function Initialize-WatcherWakeType {
-    if ("Win.FileWatcherWake" -as [type]) { return }
-
-    Add-Type -TypeDefinition @"
-namespace Win {
-    using System;
-    using System.IO;
-    using System.Threading;
-
-    public sealed class FileWatcherWake : IDisposable {
-        private readonly AutoResetEvent wake = new AutoResetEvent(false);
-        private FileSystemWatcher watcher;
-
-        private void Signal() {
-            try { wake.Set(); } catch (ObjectDisposedException) { }
-        }
-
-        private void OnFileEvent(object sender, FileSystemEventArgs e) {
-            Signal();
-        }
-
-        private void OnRenamedEvent(object sender, RenamedEventArgs e) {
-            Signal();
-        }
-
-        public void Attach(FileSystemWatcher value) {
-            Detach();
-            watcher = value;
-            if (watcher == null) return;
-
-            watcher.Changed += OnFileEvent;
-            watcher.Created += OnFileEvent;
-            watcher.Deleted += OnFileEvent;
-            watcher.Renamed += OnRenamedEvent;
-        }
-
-        public void Detach() {
-            if (watcher == null) return;
-
-            watcher.Changed -= OnFileEvent;
-            watcher.Created -= OnFileEvent;
-            watcher.Deleted -= OnFileEvent;
-            watcher.Renamed -= OnRenamedEvent;
-            watcher = null;
-        }
-
-        public bool Wait(int timeoutMilliseconds) {
-            return wake.WaitOne(timeoutMilliseconds);
-        }
-
-        public void Dispose() {
-            Detach();
-            wake.Dispose();
-        }
-    }
-}
-"@
-}
-
 function Initialize-Watcher {
     # (Re)create the FileSystemWatcher so changing WorkDir takes effect immediately.
     try {
@@ -8768,7 +8760,7 @@ function Initialize-Watcher {
 
     if (-not (Ensure-Directory $script:WatchedDir)) { throw "Cannot create/access watcher directory: $script:WatchedDir" }
 
-    Initialize-WatcherWakeType
+    if (-not ("Win.FileWatcherWake" -as [type])) { throw "Native watcher helper is unavailable." }
     if (-not $script:WatcherWake) {
         $script:WatcherWake = New-Object Win.FileWatcherWake
     }
